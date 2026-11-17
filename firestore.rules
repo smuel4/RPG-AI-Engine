@@ -57,7 +57,6 @@ service cloud.firestore {
     // -------------------------------------------------------------------------
     function isValidProtagonist(p) {
       return p is map &&
-        p.keys().hasAll(['name', 'age', 'origin', 'futureHook', 'vitality', 'maxVitality', 'focus', 'maxFocus', 'disposition']) &&
         p.keys().hasOnly(['name', 'age', 'origin', 'futureHook', 'vitality', 'maxVitality', 'focus', 'maxFocus', 'disposition']) &&
         p.name is string && p.name.size() >= 1 && p.name.size() <= 80 &&
         p.age is int && p.age >= 1 && p.age <= 200 &&
@@ -72,7 +71,6 @@ service cloud.firestore {
 
     function isValidCurrency(c) {
       return c is map &&
-        c.keys().hasAll(['gold', 'silver', 'copper']) &&
         c.keys().hasOnly(['gold', 'silver', 'copper']) &&
         c.gold is int && c.gold >= 0 && c.gold <= 10000000 &&
         c.silver is int && c.silver >= 0 && c.silver <= 10000000 &&
@@ -81,7 +79,6 @@ service cloud.firestore {
 
     function isValidWorldTime(t) {
       return t is map &&
-        t.keys().hasAll(['year', 'month', 'day', 'weekday', 'season', 'hour', 'minute', 'periodOfDay']) &&
         t.keys().hasOnly(['year', 'month', 'day', 'weekday', 'season', 'hour', 'minute', 'periodOfDay']) &&
         t.year is int && t.year >= 1 && t.year <= 99999 &&
         t.month is int && t.month >= 1 && t.month <= 12 &&
@@ -95,7 +92,6 @@ service cloud.firestore {
 
     function isValidTimelineSegment(seg) {
       return seg is map &&
-        seg.keys().hasAll(['timelineId', 'fromSequence', 'toSequence']) &&
         seg.keys().hasOnly(['timelineId', 'fromSequence', 'toSequence']) &&
         isValidId(seg.timelineId) &&
         seg.fromSequence is int && seg.fromSequence >= 0 &&
@@ -238,11 +234,6 @@ service cloud.firestore {
 
     function isValidCheckpoint(data, campaignId) {
       return data is map &&
-        data.keys().hasAll([
-          'id', 'ownerId', 'campaignId', 'label', 'note', 'revision',
-          'lastSequence', 'currentLocation', 'protagonist', 'currency',
-          'worldTime', 'inventorySnapshot', 'npcsSnapshot', 'createdAt'
-        ]) &&
         data.keys().hasOnly([
           'id', 'ownerId', 'campaignId', 'label', 'note', 'revision',
           'lastSequence', 'timelineId', 'narrativeCutoffSequence', 'timelineLineageSnapshot',
