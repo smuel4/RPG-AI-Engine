@@ -295,9 +295,6 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         incoming().revision == existing().revision + 1 &&
         (
-          incoming().diff(existing()).affectedKeys().hasOnly(['worldTime', 'lastSequence', 'revision', 'updatedAt', 'currentLocation', 'protagonist']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['lastSequence', 'revision', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['currency', 'lastSequence', 'revision', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly([
             'protagonist', 'currency', 'worldTime', 'currentLocation',
             'lastSequence', 'revision', 'updatedAt',
