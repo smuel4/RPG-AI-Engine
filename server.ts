@@ -1,8 +1,9 @@
-import express from 'express';
+﻿import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { verifyFirebasePlayer } from './server/firebaseAuth';
 
 dotenv.config();
 
@@ -27,15 +28,29 @@ async function startServer() {
     });
   });
 
-  // Reserved server-side boundary for Milestone 2 Gemini Narrator integration
-  app.post('/api/narrator/turn', (_req, res) => {
-    res.status(501).json({
-      code: 'NARRATOR_STAGE_2_PENDING',
-      message:
-        'A integração com a Gemini API está reservada para a Etapa 2. Este marco utiliza narrativa fixa de teste.',
-    });
-  });
+  // Stage 2: authenticated narrator endpoint
+  app.post('/api/narrator/turn', async (req, res) => {
+    const authorization = req.header('authorization');
 
+    if (!authorization) {
+      res.status(401).json({ code: 'AUTH_REQUIRED' });
+      return;
+    }
+
+    try {
+      const playerId = await verifyFirebasePlayer(authorization);
+
+      if (!playerId) {
+        res.status(401).json({ code: 'AUTH_REQUIRED' });
+        return;
+      }
+
+      // Gemini remains disabled until authorization is complete.
+      res.status(501).json({ code: 'NARRATOR_STAGE_2_PENDING' });
+    } catch {
+      res.status(401).json({ code: 'INVALID_FIREBASE_TOKEN' });
+    }
+  });
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -62,3 +77,4 @@ startServer().catch((error) => {
   console.error('Failed to start RPG AI Engine server:', error);
   process.exit(1);
 });
+

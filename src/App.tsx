@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { FolderPlus, Sparkles } from 'lucide-react';
 import { useAuth } from './hooks/useAuth';
+import { DevAuthProbe } from './components/DevAuthProbe';
 import {
   buildCheckpointPayload,
   classifyEventsForAudit,
@@ -555,6 +556,8 @@ export default function App() {
         )}
       </main>
 
+      <DevAuthProbe user={user} />
+
       <CampaignHubModal
         isOpen={campaignHubOpen}
         campaigns={campaigns}
@@ -584,3 +587,4 @@ export default function App() {
     </div>
   );
 }
+
