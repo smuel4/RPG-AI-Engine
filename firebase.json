@@ -1,0 +1,14 @@
+{
+    "firestore":  [
+                      {
+                          "database":  "ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704",
+                          "rules":  "firestore.rules"
+                      }
+                  ],
+    "emulators":  {
+                      "firestore":  {
+                                        "host":  "127.0.0.1",
+                                        "port":  8080
+                                    }
+                  }
+}
