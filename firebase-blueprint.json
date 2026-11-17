@@ -1,0 +1,515 @@
+{
+  "entities": {
+    "Campaign": {
+      "title": "Campaign",
+      "description": "Campanha independente de RPG com estado estruturado completo do protagonista, moedas, tempo do mundo e metadados.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "setting": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "currentLocation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "archived"]
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "lastSequence": {
+          "type": "integer"
+        },
+        "protagonist": {
+          "type": "object",
+          "description": "Dados estruturados do protagonista (ex: Samuel, 18 anos)."
+        },
+        "currency": {
+          "type": "object",
+          "description": "Moedas estruturadas (gold, silver, copper)."
+        },
+        "worldTime": {
+          "type": "object",
+          "description": "Calendário e horário estruturado do mundo."
+        },
+        "activeTimelineId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "timelineLineage": {
+          "type": "array",
+          "description": "Segmentos da linha temporal ativa usados para manter coerência narrativa após restauração de checkpoints."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "name",
+        "setting",
+        "currentLocation",
+        "status",
+        "revision",
+        "lastSequence",
+        "protagonist",
+        "currency",
+        "worldTime",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Item estruturado pertencente ao inventário de uma campanha.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "campaignId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "category": {
+          "type": "string",
+          "enum": ["equipamento", "consumivel", "documento", "recurso", "chave"]
+        },
+        "quantity": {
+          "type": "integer"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "equipable": {
+          "type": "boolean"
+        },
+        "equipped": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "campaignId",
+        "name",
+        "category",
+        "quantity",
+        "description",
+        "equipable",
+        "equipped",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "NpcRecord": {
+      "title": "NpcRecord",
+      "description": "Registro estruturado de personagem do mundo (ex: Teresa, Henrique).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "campaignId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "location": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "relationship": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "campaignId",
+        "name",
+        "role",
+        "location",
+        "relationship",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "NarrativeEntry": {
+      "title": "NarrativeEntry",
+      "description": "Entrada ordenada da área central de narrativa e acontecimentos.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "campaignId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "timelineId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sequence": {
+          "type": "integer"
+        },
+        "authorRole": {
+          "type": "string",
+          "enum": ["system_seed", "player_action", "engine_response"]
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "worldTimeLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "campaignId",
+        "sequence",
+        "authorRole",
+        "content",
+        "worldTimeLabel",
+        "createdAt"
+      ]
+    },
+    "GameEvent": {
+      "title": "GameEvent",
+      "description": "Registro auditável de eventos para inspeção, rastreabilidade e restauração futura.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "campaignId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "timelineId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sequence": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "CAMPAIGN_CREATED",
+            "PLAYER_ACTION",
+            "INVENTORY_ADDED",
+            "INVENTORY_UPDATED",
+            "INVENTORY_REMOVED",
+            "CURRENCY_UPDATED",
+            "TIME_ADVANCED",
+            "CHECKPOINT_SAVED",
+            "CHECKPOINT_LOADED"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "beforeSummary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "afterSummary": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "worldTimeLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "campaignId",
+        "sequence",
+        "type",
+        "summary",
+        "actor",
+        "beforeSummary",
+        "afterSummary",
+        "worldTimeLabel",
+        "createdAt"
+      ]
+    },
+    "Checkpoint": {
+      "title": "Checkpoint",
+      "description": "Ponto de controle completo salvo manualmente para restauração de estado da campanha.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "campaignId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "note": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "lastSequence": {
+          "type": "integer"
+        },
+        "timelineId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "narrativeCutoffSequence": {
+          "type": "integer"
+        },
+        "timelineLineageSnapshot": {
+          "type": "array"
+        },
+        "currentLocation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "protagonist": {
+          "type": "object"
+        },
+        "currency": {
+          "type": "object"
+        },
+        "worldTime": {
+          "type": "object"
+        },
+        "inventorySnapshot": {
+          "type": "array"
+        },
+        "npcsSnapshot": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "campaignId",
+        "label",
+        "note",
+        "revision",
+        "lastSequence",
+        "currentLocation",
+        "protagonist",
+        "currency",
+        "worldTime",
+        "inventorySnapshot",
+        "npcsSnapshot",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/campaigns/{campaignId}": {
+      "schema": {
+        "$ref": "#/entities/Campaign"
+      },
+      "description": "Documento principal de cada campanha independente do usuário."
+    },
+    "/campaigns/{campaignId}/inventory/{itemId}": {
+      "schema": {
+        "$ref": "#/entities/InventoryItem"
+      },
+      "description": "Itens estruturados no inventário da campanha."
+    },
+    "/campaigns/{campaignId}/npcs/{npcId}": {
+      "schema": {
+        "$ref": "#/entities/NpcRecord"
+      },
+      "description": "Personagens conhecidos e relações do mundo na campanha."
+    },
+    "/campaigns/{campaignId}/narrative/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/NarrativeEntry"
+      },
+      "description": "Entradas ordenadas de narrativa fixa inicial, ações do jogador e respostas."
+    },
+    "/campaigns/{campaignId}/events/{eventId}": {
+      "schema": {
+        "$ref": "#/entities/GameEvent"
+      },
+      "description": "Log auditável de eventos e mutações de estado."
+    },
+    "/campaigns/{campaignId}/checkpoints/{checkpointId}": {
+      "schema": {
+        "$ref": "#/entities/Checkpoint"
+      },
+      "description": "Snapshots manuais salvos para restauração de estado."
+    }
+  }
+}

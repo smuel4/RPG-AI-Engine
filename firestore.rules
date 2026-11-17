@@ -1,0 +1,412 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Global Helpers
+    // -------------------------------------------------------------------------
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidOwnerId(uid) {
+      return uid is string && uid.size() >= 1 && uid.size() <= 128 && uid == request.auth.uid;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function hasCampaignOwnerUid(campaignId) {
+      let campaignDoc = get(/databases/$(database)/documents/campaigns/$(campaignId));
+      return campaignDoc != null && campaignDoc.data.ownerId == request.auth.uid;
+    }
+
+    function isCampaignOwner(campaignId) {
+      return isSignedIn() && isVerified() && hasCampaignOwnerUid(campaignId);
+    }
+
+    function hasCampaignOwnerUidAfter(campaignId) {
+      let campaignDocAfter = getAfter(/databases/$(database)/documents/campaigns/$(campaignId));
+      return campaignDocAfter != null && campaignDocAfter.data.ownerId == request.auth.uid;
+    }
+
+    function isCampaignOwnerAfter(campaignId) {
+      return isSignedIn() && isVerified() && hasCampaignOwnerUidAfter(campaignId);
+    }
+
+    // -------------------------------------------------------------------------
+    // Sub-object Validation Helpers
+    // -------------------------------------------------------------------------
+    function isValidProtagonist(p) {
+      return p is map &&
+        p.keys().hasAll(['name', 'age', 'origin', 'futureHook', 'vitality', 'maxVitality', 'focus', 'maxFocus', 'disposition']) &&
+        p.keys().hasOnly(['name', 'age', 'origin', 'futureHook', 'vitality', 'maxVitality', 'focus', 'maxFocus', 'disposition']) &&
+        p.name is string && p.name.size() >= 1 && p.name.size() <= 80 &&
+        p.age is int && p.age >= 1 && p.age <= 200 &&
+        p.origin is string && p.origin.size() >= 1 && p.origin.size() <= 240 &&
+        p.futureHook is string && p.futureHook.size() >= 0 && p.futureHook.size() <= 240 &&
+        p.vitality is int && p.vitality >= 0 && p.vitality <= 9999 &&
+        p.maxVitality is int && p.maxVitality >= 1 && p.maxVitality <= 9999 &&
+        p.focus is int && p.focus >= 0 && p.focus <= 9999 &&
+        p.maxFocus is int && p.maxFocus >= 1 && p.maxFocus <= 9999 &&
+        p.disposition is string && p.disposition.size() >= 1 && p.disposition.size() <= 80;
+    }
+
+    function isValidCurrency(c) {
+      return c is map &&
+        c.keys().hasAll(['gold', 'silver', 'copper']) &&
+        c.keys().hasOnly(['gold', 'silver', 'copper']) &&
+        c.gold is int && c.gold >= 0 && c.gold <= 10000000 &&
+        c.silver is int && c.silver >= 0 && c.silver <= 10000000 &&
+        c.copper is int && c.copper >= 0 && c.copper <= 10000000;
+    }
+
+    function isValidWorldTime(t) {
+      return t is map &&
+        t.keys().hasAll(['year', 'month', 'day', 'weekday', 'season', 'hour', 'minute', 'periodOfDay']) &&
+        t.keys().hasOnly(['year', 'month', 'day', 'weekday', 'season', 'hour', 'minute', 'periodOfDay']) &&
+        t.year is int && t.year >= 1 && t.year <= 99999 &&
+        t.month is int && t.month >= 1 && t.month <= 12 &&
+        t.day is int && t.day >= 1 && t.day <= 31 &&
+        t.weekday is string && t.weekday.size() >= 1 && t.weekday.size() <= 40 &&
+        t.season is string && t.season.size() >= 1 && t.season.size() <= 40 &&
+        t.hour is int && t.hour >= 0 && t.hour <= 23 &&
+        t.minute is int && t.minute >= 0 && t.minute <= 59 &&
+        t.periodOfDay is string && t.periodOfDay.size() >= 1 && t.periodOfDay.size() <= 40;
+    }
+
+    function isValidTimelineSegment(seg) {
+      return seg is map &&
+        seg.keys().hasAll(['timelineId', 'fromSequence', 'toSequence']) &&
+        seg.keys().hasOnly(['timelineId', 'fromSequence', 'toSequence']) &&
+        isValidId(seg.timelineId) &&
+        seg.fromSequence is int && seg.fromSequence >= 0 &&
+        (seg.toSequence == null || (seg.toSequence is int && seg.toSequence >= seg.fromSequence));
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints
+    // -------------------------------------------------------------------------
+    function isValidCampaign(data) {
+      return data is map &&
+        data.keys().hasAll([
+          'id', 'ownerId', 'name', 'setting', 'currentLocation', 'status',
+          'revision', 'lastSequence', 'protagonist', 'currency', 'worldTime',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'name', 'setting', 'currentLocation', 'status',
+          'revision', 'lastSequence', 'protagonist', 'currency', 'worldTime',
+          'activeTimelineId', 'timelineLineage',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidOwnerId(data.ownerId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.setting is string && data.setting.size() >= 1 && data.setting.size() <= 240 &&
+        data.currentLocation is string && data.currentLocation.size() >= 1 && data.currentLocation.size() <= 120 &&
+        data.status in ['active', 'archived'] &&
+        data.revision is int && data.revision >= 1 &&
+        data.lastSequence is int && data.lastSequence >= 0 &&
+        isValidProtagonist(data.protagonist) &&
+        isValidCurrency(data.currency) &&
+        isValidWorldTime(data.worldTime) &&
+        (!('activeTimelineId' in data) || isValidId(data.activeTimelineId)) &&
+        (!('timelineLineage' in data) || (
+          data.timelineLineage is list &&
+          data.timelineLineage.size() >= 1 &&
+          data.timelineLineage.size() <= 64 &&
+          isValidTimelineSegment(data.timelineLineage[0]) &&
+          (data.timelineLineage.size() == 1 || isValidTimelineSegment(data.timelineLineage[data.timelineLineage.size() - 1]))
+        )) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidInventoryItem(data, campaignId) {
+      return data is map &&
+        data.keys().hasAll([
+          'id', 'ownerId', 'campaignId', 'name', 'category', 'quantity',
+          'description', 'equipable', 'equipped', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'campaignId', 'name', 'category', 'quantity',
+          'description', 'equipable', 'equipped', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidOwnerId(data.ownerId) &&
+        data.campaignId == campaignId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.category in ['equipamento', 'consumivel', 'documento', 'recurso', 'chave'] &&
+        data.quantity is int && data.quantity >= 0 && data.quantity <= 99999 &&
+        data.description is string && data.description.size() <= 240 &&
+        data.equipable is bool &&
+        data.equipped is bool &&
+        (!data.equipped || data.equipable) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNpcRecord(data, campaignId) {
+      return data is map &&
+        data.keys().hasAll([
+          'id', 'ownerId', 'campaignId', 'name', 'role', 'location',
+          'relationship', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'campaignId', 'name', 'role', 'location',
+          'relationship', 'notes', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidOwnerId(data.ownerId) &&
+        data.campaignId == campaignId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.role is string && data.role.size() >= 1 && data.role.size() <= 80 &&
+        data.location is string && data.location.size() >= 1 && data.location.size() <= 120 &&
+        data.relationship is string && data.relationship.size() >= 1 && data.relationship.size() <= 80 &&
+        data.notes is string && data.notes.size() <= 300 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNarrativeEntry(data, campaignId) {
+      return data is map &&
+        data.keys().hasAll([
+          'id', 'ownerId', 'campaignId', 'sequence', 'authorRole',
+          'content', 'worldTimeLabel', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'campaignId', 'timelineId', 'sequence', 'authorRole',
+          'content', 'worldTimeLabel', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidOwnerId(data.ownerId) &&
+        data.campaignId == campaignId &&
+        (!('timelineId' in data) || isValidId(data.timelineId)) &&
+        data.sequence is int && data.sequence >= 1 &&
+        data.authorRole in ['system_seed', 'player_action', 'engine_response'] &&
+        data.content is string && data.content.size() >= 1 && data.content.size() <= 2000 &&
+        data.worldTimeLabel is string && data.worldTimeLabel.size() >= 1 && data.worldTimeLabel.size() <= 120 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidGameEvent(data, campaignId) {
+      return data is map &&
+        data.keys().hasAll([
+          'id', 'ownerId', 'campaignId', 'sequence', 'type', 'summary',
+          'actor', 'beforeSummary', 'afterSummary', 'worldTimeLabel', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'campaignId', 'timelineId', 'sequence', 'type', 'summary',
+          'actor', 'beforeSummary', 'afterSummary', 'worldTimeLabel', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidOwnerId(data.ownerId) &&
+        data.campaignId == campaignId &&
+        (!('timelineId' in data) || isValidId(data.timelineId)) &&
+        data.sequence is int && data.sequence >= 1 &&
+        data.type in [
+          'CAMPAIGN_CREATED', 'PLAYER_ACTION', 'INVENTORY_ADDED',
+          'INVENTORY_UPDATED', 'INVENTORY_REMOVED', 'CURRENCY_UPDATED',
+          'TIME_ADVANCED', 'CHECKPOINT_SAVED', 'CHECKPOINT_LOADED'
+        ] &&
+        data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 240 &&
+        data.actor is string && data.actor.size() >= 1 && data.actor.size() <= 80 &&
+        data.beforeSummary is string && data.beforeSummary.size() <= 400 &&
+        data.afterSummary is string && data.afterSummary.size() <= 400 &&
+        data.worldTimeLabel is string && data.worldTimeLabel.size() >= 1 && data.worldTimeLabel.size() <= 120 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCheckpoint(data, campaignId) {
+      return data is map &&
+        data.keys().hasAll([
+          'id', 'ownerId', 'campaignId', 'label', 'note', 'revision',
+          'lastSequence', 'currentLocation', 'protagonist', 'currency',
+          'worldTime', 'inventorySnapshot', 'npcsSnapshot', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'campaignId', 'label', 'note', 'revision',
+          'lastSequence', 'timelineId', 'narrativeCutoffSequence', 'timelineLineageSnapshot',
+          'currentLocation', 'protagonist', 'currency',
+          'worldTime', 'inventorySnapshot', 'npcsSnapshot', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidOwnerId(data.ownerId) &&
+        data.campaignId == campaignId &&
+        data.label is string && data.label.size() >= 1 && data.label.size() <= 80 &&
+        data.note is string && data.note.size() <= 240 &&
+        data.revision is int && data.revision >= 1 &&
+        data.lastSequence is int && data.lastSequence >= 0 &&
+        (!('timelineId' in data) || isValidId(data.timelineId)) &&
+        (!('narrativeCutoffSequence' in data) || (data.narrativeCutoffSequence is int && data.narrativeCutoffSequence >= 0)) &&
+        (!('timelineLineageSnapshot' in data) || (
+          data.timelineLineageSnapshot is list &&
+          data.timelineLineageSnapshot.size() >= 1 &&
+          data.timelineLineageSnapshot.size() <= 64 &&
+          isValidTimelineSegment(data.timelineLineageSnapshot[0]) &&
+          (data.timelineLineageSnapshot.size() == 1 || isValidTimelineSegment(data.timelineLineageSnapshot[data.timelineLineageSnapshot.size() - 1]))
+        )) &&
+        data.currentLocation is string && data.currentLocation.size() >= 1 && data.currentLocation.size() <= 120 &&
+        isValidProtagonist(data.protagonist) &&
+        isValidCurrency(data.currency) &&
+        isValidWorldTime(data.worldTime) &&
+        data.inventorySnapshot is list &&
+        data.inventorySnapshot.size() <= 100 &&
+        (data.inventorySnapshot.size() == 0 || data.inventorySnapshot[0] is map) &&
+        data.npcsSnapshot is list &&
+        data.npcsSnapshot.size() <= 100 &&
+        (data.npcsSnapshot.size() == 0 || data.npcsSnapshot[0] is map) &&
+        data.createdAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Match Rules
+    // -------------------------------------------------------------------------
+    match /campaigns/{campaignId} {
+      allow get: if isSignedIn() && isVerified() && isValidId(campaignId) &&
+        (resource == null || existing().ownerId == request.auth.uid);
+
+      allow list: if isSignedIn() && isVerified() &&
+        resource.data.ownerId == request.auth.uid;
+
+      allow create: if isSignedIn() && isVerified() && isValidId(campaignId) &&
+        isValidCampaign(incoming()) &&
+        incoming().id == campaignId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() && isVerified() && isValidId(campaignId) &&
+        isValidCampaign(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        existing().status != 'archived' &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().revision == existing().revision + 1 &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['worldTime', 'lastSequence', 'revision', 'updatedAt', 'currentLocation', 'protagonist']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['lastSequence', 'revision', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['currency', 'lastSequence', 'revision', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'protagonist', 'currency', 'worldTime', 'currentLocation',
+            'lastSequence', 'revision', 'updatedAt',
+            'activeTimelineId', 'timelineLineage'
+          ]) ||
+          (incoming().status == 'archived' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'revision', 'updatedAt']))
+        );
+
+      allow delete: if isSignedIn() && isVerified() && isValidId(campaignId) &&
+        existing().ownerId == request.auth.uid;
+
+      match /inventory/{itemId} {
+        allow get: if isValidId(campaignId) && isValidId(itemId) && isCampaignOwner(campaignId);
+        allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(campaignId) && isValidId(itemId) &&
+          isValidInventoryItem(incoming(), campaignId) &&
+          incoming().id == itemId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+
+        allow update: if isValidId(campaignId) && isValidId(itemId) &&
+          isValidInventoryItem(incoming(), campaignId) &&
+          isCampaignOwner(campaignId) &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().campaignId == existing().campaignId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['quantity', 'equipped', 'description', 'name', 'category', 'equipable', 'updatedAt']);
+
+        allow delete: if isValidId(campaignId) && isValidId(itemId) && isCampaignOwner(campaignId);
+      }
+
+      match /npcs/{npcId} {
+        allow get: if isValidId(campaignId) && isValidId(npcId) && isCampaignOwner(campaignId);
+        allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(campaignId) && isValidId(npcId) &&
+          isValidNpcRecord(incoming(), campaignId) &&
+          incoming().id == npcId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+
+        allow update: if isValidId(campaignId) && isValidId(npcId) &&
+          isValidNpcRecord(incoming(), campaignId) &&
+          isCampaignOwner(campaignId) &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().campaignId == existing().campaignId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'location', 'relationship', 'notes', 'updatedAt']);
+
+        allow delete: if isValidId(campaignId) && isValidId(npcId) && isCampaignOwner(campaignId);
+      }
+
+      match /narrative/{entryId} {
+        allow get: if isValidId(campaignId) && isValidId(entryId) && isCampaignOwner(campaignId);
+        allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(campaignId) && isValidId(entryId) &&
+          isValidNarrativeEntry(incoming(), campaignId) &&
+          incoming().id == entryId &&
+          incoming().createdAt == request.time &&
+          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+
+        allow update: if false;
+        allow delete: if isValidId(campaignId) && isValidId(entryId) && isCampaignOwner(campaignId);
+      }
+
+      match /events/{eventId} {
+        allow get: if isValidId(campaignId) && isValidId(eventId) && isCampaignOwner(campaignId);
+        allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(campaignId) && isValidId(eventId) &&
+          isValidGameEvent(incoming(), campaignId) &&
+          incoming().id == eventId &&
+          incoming().createdAt == request.time &&
+          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+
+        allow update: if false;
+        allow delete: if isValidId(campaignId) && isValidId(eventId) && isCampaignOwner(campaignId);
+      }
+
+      match /checkpoints/{checkpointId} {
+        allow get: if isValidId(campaignId) && isValidId(checkpointId) && isCampaignOwner(campaignId);
+        allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(campaignId) && isValidId(checkpointId) &&
+          isValidCheckpoint(incoming(), campaignId) &&
+          incoming().id == checkpointId &&
+          incoming().createdAt == request.time &&
+          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+
+        allow update: if false;
+        allow delete: if isValidId(campaignId) && isValidId(checkpointId) && isCampaignOwner(campaignId);
+      }
+    }
+  }
+}

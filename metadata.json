@@ -1,0 +1,6 @@
+{
+  "name": "RPG AI Engine",
+  "description": "Motor de RPG narrativo em português com memória persistente em Cloud Firestore, regras determinísticas, mundo evolutivo e campanha de teste ECHO ARC.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
