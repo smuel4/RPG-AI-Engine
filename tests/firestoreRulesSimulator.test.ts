@@ -1227,6 +1227,9 @@ test('[Simulador de Regras] Criação de ação, inventário, moedas, avanço de
   });
   seedCampaignInSim(sim, auth, customBundle);
 
+  assert.equal(sim.getDoc(auth, 'campaigns/' + bundle.campaign.id)?.currentLocation, 'Vila de Freixo');
+  assert.equal(sim.getDoc(auth, 'campaigns/' + customBundle.campaign.id)?.currentLocation, 'Portão Sul');
+
   const cid = bundle.campaign.id;
 
   // 1. Ação do jogador (commitPlayerAction)
@@ -1816,6 +1819,8 @@ test('[Dirty Dozen & Red Team] Todos os 12 payloads adversariais e injeção em 
 
   // Verifica também que firestore.rules no disco contém a validação da cauda de timelineLineage
   const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf8');
-  assert.match(rulesText, /timelineLineage\.size\(\)\s*-\s*1/);
+  assert.match(rulesText, /isValidTimelineSegment\(lineage\[lineage\.size\(\)\s*-\s*1\]\)/);
+  assert.match(rulesText, /isValidLineage\(data\.timelineLineage\)/);
+  assert.match(rulesText, /isValidLineage\(after\.timelineLineage\)/);
   assert.match(rulesText, /timelineLineageSnapshot\.size\(\)\s*-\s*1/);
 });

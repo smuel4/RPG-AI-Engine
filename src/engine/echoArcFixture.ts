@@ -1,3 +1,4 @@
+import { freixoWoodWorkshop } from './npcIdentity';
 import type {
   Campaign,
   InventoryItem,
@@ -141,7 +142,7 @@ export function createEchoArcBundle(ownerId: string): CampaignSeedBundle {
       campaignId,
       name: 'Henrique',
       role: 'Pai adotivo',
-      location: 'Oficina de Madeira · Vila de Freixo',
+      location: freixoWoodWorkshop,
       relationship: 'Família (Confiança plena)',
       notes: 'Artesão respeitado na vila; ensinou a Samuel noções práticas de ofício e disciplina.',
     },

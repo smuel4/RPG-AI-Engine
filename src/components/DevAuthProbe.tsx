@@ -3,16 +3,20 @@ import type { User } from 'firebase/auth';
 
 interface Props {
   user: User | null;
+  campaignId: string | null;
 }
 
-export function DevAuthProbe({ user }: Props) {
+export function DevAuthProbe({ user, campaignId }: Props) {
   const [result, setResult] = useState('Ainda não testado');
   const [testing, setTesting] = useState(false);
 
   if (!import.meta.env.DEV || !user) return null;
 
   async function testAuthentication() {
-    if (!user) return;
+    if (!user || !campaignId) {
+      setResult('Selecione uma campanha primeiro');
+      return;
+    }
 
     setTesting(true);
     setResult('Verificando...');
@@ -26,7 +30,7 @@ export function DevAuthProbe({ user }: Props) {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: '{}',
+        body: JSON.stringify({ campaignId }),
       });
 
       setResult(`HTTP STATUS: ${response.status}`);
@@ -51,3 +55,4 @@ export function DevAuthProbe({ user }: Props) {
     </div>
   );
 }
+

@@ -265,7 +265,9 @@ export function advanceWorldTime(current: WorldTime, minutesToAdd: number): Worl
   }
 
   const totalDaysElapsed = (year - 1) * 360 + (month - 1) * 30 + (day - 1);
-  const weekday = WORLD_WEEKDAYS[totalDaysElapsed % WORLD_WEEKDAYS.length];
+  const previousWeekday = WORLD_WEEKDAYS.findIndex((name) => name === current.weekday);
+  const weekdayIndex = previousWeekday < 0 ? totalDaysElapsed : previousWeekday + dayOffset;
+  const weekday = WORLD_WEEKDAYS[((weekdayIndex % WORLD_WEEKDAYS.length) + WORLD_WEEKDAYS.length) % WORLD_WEEKDAYS.length];
   const season = WORLD_SEASONS[month - 1] ?? current.season;
 
   return {
@@ -329,6 +331,7 @@ export function processPlayerAction(
   npcs: NpcRecord[],
   rawAction: string,
   advanceMinutes = 10,
+  customNarratorResponse?: string,
 ): RuleResult<PlayerActionResult> {
   if (campaign.status === 'archived') {
     return {
@@ -382,12 +385,15 @@ export function processPlayerAction(
     worldTime: nextWorldTime,
   };
 
-  const responseText = defaultNarratorAdapter.respondToPlayerAction({
-    campaign: updatedCampaignSnapshot,
-    inventory,
-    npcs,
-    declaredAction: trimmed,
-  });
+  const responseText =
+    customNarratorResponse !== undefined
+      ? customNarratorResponse
+      : defaultNarratorAdapter.respondToPlayerAction({
+          campaign: updatedCampaignSnapshot,
+          inventory,
+          npcs,
+          declaredAction: trimmed,
+        });
 
   return {
     ok: true,

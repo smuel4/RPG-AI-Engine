@@ -48,8 +48,9 @@ service cloud.firestore {
       return campaignDocAfter != null && campaignDocAfter.data.ownerId == request.auth.uid;
     }
 
-    function isCampaignOwnerAfter(campaignId) {
-      return isSignedIn() && isVerified() && hasCampaignOwnerUidAfter(campaignId);
+    function ownsCampaignForCreate(campaignId) {
+      return isSignedIn() && isVerified() &&
+        (hasCampaignOwnerUid(campaignId) || hasCampaignOwnerUidAfter(campaignId));
     }
 
     // -------------------------------------------------------------------------
@@ -98,6 +99,35 @@ service cloud.firestore {
         (seg.toSequence == null || (seg.toSequence is int && seg.toSequence >= seg.fromSequence));
     }
 
+    function isValidLineage(lineage) {
+      return lineage is list && lineage.size() >= 1 && lineage.size() <= 64 &&
+        isValidTimelineSegment(lineage[0]) &&
+        (lineage.size() == 1 || isValidTimelineSegment(lineage[lineage.size() - 1]));
+    }
+
+    function isValidCampaignUpdate(before, after) {
+      // Creation validates the full schema; updates validate only the allowed changes.
+      let changed = after.diff(before).affectedKeys();
+      return before.ownerId == request.auth.uid && before.status != 'archived' &&
+        after.updatedAt == request.time && after.revision is int &&
+        after.revision == before.revision + 1 &&
+        (
+          (after.status == 'archived' && changed.hasOnly(['status', 'revision', 'updatedAt'])) ||
+          (changed.hasOnly([
+            'protagonist', 'currency', 'worldTime', 'currentLocation',
+            'lastSequence', 'revision', 'updatedAt', 'activeTimelineId', 'timelineLineage'
+          ]) &&
+            (!changed.hasAny(['protagonist']) || isValidProtagonist(after.protagonist)) &&
+            (!changed.hasAny(['currency']) || isValidCurrency(after.currency)) &&
+            (!changed.hasAny(['worldTime']) || isValidWorldTime(after.worldTime)) &&
+            (!changed.hasAny(['currentLocation']) ||
+              (after.currentLocation is string && after.currentLocation.size() >= 1 && after.currentLocation.size() <= 120)) &&
+            (!changed.hasAny(['lastSequence']) || (after.lastSequence is int && after.lastSequence >= 0)) &&
+            (!changed.hasAny(['activeTimelineId']) || !('activeTimelineId' in after) || isValidId(after.activeTimelineId)) &&
+            (!changed.hasAny(['timelineLineage']) || !('timelineLineage' in after) || isValidLineage(after.timelineLineage)))
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Entity Validation Blueprints
     // -------------------------------------------------------------------------
@@ -126,13 +156,7 @@ service cloud.firestore {
         isValidCurrency(data.currency) &&
         isValidWorldTime(data.worldTime) &&
         (!('activeTimelineId' in data) || isValidId(data.activeTimelineId)) &&
-        (!('timelineLineage' in data) || (
-          data.timelineLineage is list &&
-          data.timelineLineage.size() >= 1 &&
-          data.timelineLineage.size() <= 64 &&
-          isValidTimelineSegment(data.timelineLineage[0]) &&
-          (data.timelineLineage.size() == 1 || isValidTimelineSegment(data.timelineLineage[data.timelineLineage.size() - 1]))
-        )) &&
+        (!('timelineLineage' in data) || isValidLineage(data.timelineLineage)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -272,6 +296,10 @@ service cloud.firestore {
     // -------------------------------------------------------------------------
     // Collection Match Rules
     // -------------------------------------------------------------------------
+    function clientCanWriteCampaign(campaignId) {
+      return campaignId != 'echo-arc-server-pilot';
+    }
+
     match /campaigns/{campaignId} {
       allow get: if isSignedIn() && isVerified() && isValidId(campaignId) &&
         (resource == null || existing().ownerId == request.auth.uid);
@@ -279,45 +307,30 @@ service cloud.firestore {
       allow list: if isSignedIn() && isVerified() &&
         resource.data.ownerId == request.auth.uid;
 
-      allow create: if isSignedIn() && isVerified() && isValidId(campaignId) &&
+      allow create: if clientCanWriteCampaign(campaignId) && isSignedIn() && isVerified() && isValidId(campaignId) &&
         isValidCampaign(incoming()) &&
         incoming().id == campaignId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
 
-      allow update: if isSignedIn() && isVerified() && isValidId(campaignId) &&
-        isValidCampaign(incoming()) &&
-        existing().ownerId == request.auth.uid &&
-        existing().status != 'archived' &&
-        incoming().id == existing().id &&
-        incoming().ownerId == existing().ownerId &&
-        incoming().createdAt == existing().createdAt &&
-        incoming().updatedAt == request.time &&
-        incoming().revision == existing().revision + 1 &&
-        (
-          incoming().diff(existing()).affectedKeys().hasOnly([
-            'protagonist', 'currency', 'worldTime', 'currentLocation',
-            'lastSequence', 'revision', 'updatedAt',
-            'activeTimelineId', 'timelineLineage'
-          ]) ||
-          (incoming().status == 'archived' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'revision', 'updatedAt']))
-        );
+      allow update: if clientCanWriteCampaign(campaignId) && isSignedIn() && isVerified() && isValidId(campaignId) &&
+        isValidCampaignUpdate(existing(), incoming());
 
-      allow delete: if isSignedIn() && isVerified() && isValidId(campaignId) &&
+      allow delete: if clientCanWriteCampaign(campaignId) && isSignedIn() && isVerified() && isValidId(campaignId) &&
         existing().ownerId == request.auth.uid;
 
       match /inventory/{itemId} {
         allow get: if isValidId(campaignId) && isValidId(itemId) && isCampaignOwner(campaignId);
         allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isValidId(campaignId) && isValidId(itemId) &&
+        allow create: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(itemId) &&
           isValidInventoryItem(incoming(), campaignId) &&
           incoming().id == itemId &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
-          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+          ownsCampaignForCreate(campaignId);
 
-        allow update: if isValidId(campaignId) && isValidId(itemId) &&
+        allow update: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(itemId) &&
           isValidInventoryItem(incoming(), campaignId) &&
           isCampaignOwner(campaignId) &&
           incoming().id == existing().id &&
@@ -327,21 +340,21 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           incoming().diff(existing()).affectedKeys().hasOnly(['quantity', 'equipped', 'description', 'name', 'category', 'equipable', 'updatedAt']);
 
-        allow delete: if isValidId(campaignId) && isValidId(itemId) && isCampaignOwner(campaignId);
+        allow delete: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(itemId) && isCampaignOwner(campaignId);
       }
 
       match /npcs/{npcId} {
         allow get: if isValidId(campaignId) && isValidId(npcId) && isCampaignOwner(campaignId);
         allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isValidId(campaignId) && isValidId(npcId) &&
+        allow create: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(npcId) &&
           isValidNpcRecord(incoming(), campaignId) &&
           incoming().id == npcId &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
-          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+          ownsCampaignForCreate(campaignId);
 
-        allow update: if isValidId(campaignId) && isValidId(npcId) &&
+        allow update: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(npcId) &&
           isValidNpcRecord(incoming(), campaignId) &&
           isCampaignOwner(campaignId) &&
           incoming().id == existing().id &&
@@ -351,49 +364,49 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           incoming().diff(existing()).affectedKeys().hasOnly(['name', 'role', 'location', 'relationship', 'notes', 'updatedAt']);
 
-        allow delete: if isValidId(campaignId) && isValidId(npcId) && isCampaignOwner(campaignId);
+        allow delete: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(npcId) && isCampaignOwner(campaignId);
       }
 
       match /narrative/{entryId} {
         allow get: if isValidId(campaignId) && isValidId(entryId) && isCampaignOwner(campaignId);
         allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isValidId(campaignId) && isValidId(entryId) &&
+        allow create: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) &&
           isValidNarrativeEntry(incoming(), campaignId) &&
           incoming().id == entryId &&
           incoming().createdAt == request.time &&
-          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+          ownsCampaignForCreate(campaignId);
 
         allow update: if false;
-        allow delete: if isValidId(campaignId) && isValidId(entryId) && isCampaignOwner(campaignId);
+        allow delete: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(entryId) && isCampaignOwner(campaignId);
       }
 
       match /events/{eventId} {
         allow get: if isValidId(campaignId) && isValidId(eventId) && isCampaignOwner(campaignId);
         allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isValidId(campaignId) && isValidId(eventId) &&
+        allow create: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) &&
           isValidGameEvent(incoming(), campaignId) &&
           incoming().id == eventId &&
           incoming().createdAt == request.time &&
-          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+          ownsCampaignForCreate(campaignId);
 
         allow update: if false;
-        allow delete: if isValidId(campaignId) && isValidId(eventId) && isCampaignOwner(campaignId);
+        allow delete: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(eventId) && isCampaignOwner(campaignId);
       }
 
       match /checkpoints/{checkpointId} {
         allow get: if isValidId(campaignId) && isValidId(checkpointId) && isCampaignOwner(campaignId);
         allow list: if isSignedIn() && isVerified() && resource.data.ownerId == request.auth.uid;
 
-        allow create: if isValidId(campaignId) && isValidId(checkpointId) &&
+        allow create: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(checkpointId) &&
           isValidCheckpoint(incoming(), campaignId) &&
           incoming().id == checkpointId &&
           incoming().createdAt == request.time &&
-          (isCampaignOwner(campaignId) || isCampaignOwnerAfter(campaignId));
+          ownsCampaignForCreate(campaignId);
 
         allow update: if false;
-        allow delete: if isValidId(campaignId) && isValidId(checkpointId) && isCampaignOwner(campaignId);
+        allow delete: if clientCanWriteCampaign(campaignId) && isValidId(campaignId) && isValidId(checkpointId) && isCampaignOwner(campaignId);
       }
     }
   }

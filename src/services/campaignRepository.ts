@@ -12,6 +12,7 @@ import {
   where,
   writeBatch,
   type Unsubscribe,
+  type Transaction,
 } from 'firebase/firestore';
 import type {
   Campaign,
@@ -22,6 +23,8 @@ import type {
   NpcRecord,
 } from '../types/game';
 import type { CampaignSeedBundle } from '../engine/echoArcFixture';
+import { advanceWorldTime } from '../engine/rulesEngine';
+import { isTurnId, readCommittedTurn, turnDocumentIds, type TurnIdentity } from '../engine/turnIdentity';
 import type {
   CurrencyMutationResult,
   InventoryMutationResult,
@@ -297,6 +300,141 @@ export async function commitPlayerAction(
       error,
       OperationType.WRITE,
       `${campaignPath} [lote: update campaign, create narrative/${result.playerEntry.id}, create narrative/${result.engineEntry.id}, create events/${result.event.id}]`,
+    );
+  }
+}
+
+export interface PlayerActionTransactionOptions {
+  db?: typeof db;
+  skipAuthCheck?: boolean;
+  turn?: TurnIdentity;
+}
+
+export async function commitPlayerActionTransaction(
+  campaignId: string,
+  result: PlayerActionResult,
+  expectedRevision: number,
+  expectedTimelineId: string,
+  options?: PlayerActionTransactionOptions,
+): Promise<NarrativeEntry | undefined> {
+  const targetDb = options?.db ?? db;
+  const campaignPath = `campaigns/${campaignId}`;
+
+  // Em ambiente de navegador (producao e dev client), a checagem de autenticacao
+  // e obrigatoria e irrevogavel. A opcao skipAuthCheck so e considerada em testes Node.
+  const isBrowser = typeof window !== 'undefined';
+  if (isBrowser || !options?.skipAuthCheck) {
+    await ensureVerifiedAuthUser(result.event.ownerId);
+  }
+
+  const turn = options?.turn;
+  if (turn && (!isTurnId(turn.turnId) || turn.campaignId !== campaignId ||
+      turn.expectedRevision !== expectedRevision || turn.baseTimelineId !== expectedTimelineId ||
+      turn.declaredAction.trim() !== result.playerEntry.content ||
+      !Number.isSafeInteger(turn.advanceMinutes) || turn.advanceMinutes < 0 || turn.advanceMinutes > 720)) {
+    throw new Error('TURN_ID_CONFLICT');
+  }
+  const ids = turn && await turnDocumentIds(turn);
+  const campaignRef = doc(targetDb, 'campaigns', campaignId);
+  const readReceipt = async (tx: Transaction, ownerId: string) => {
+    if (!turn || !ids) return undefined;
+    const event = await tx.get(doc(targetDb, campaignPath, 'events', ids.event));
+    if (!event.exists()) return undefined;
+    const player = await tx.get(doc(targetDb, campaignPath, 'narrative', ids.player));
+    const engine = await tx.get(doc(targetDb, campaignPath, 'narrative', ids.engine));
+    return readCommittedTurn(turn, ownerId, event.data() as GameEvent,
+      player.data() as NarrativeEntry | undefined, engine.data() as NarrativeEntry | undefined);
+  };
+  try {
+    return await runTransaction(targetDb, async (tx) => {
+      const snap = await tx.get(campaignRef);
+
+      if (!snap.exists()) {
+        throw new Error(`CONCURRENT_STATE_CONFLICT: Campanha ${campaignId} não encontrada.`);
+      }
+
+      const currentCampaign = snap.data() as Campaign;
+      if (turn && ids) {
+        const replay = await readReceipt(tx, currentCampaign.ownerId);
+        if (replay === null) throw new Error('TURN_ID_CONFLICT');
+        if (replay) return replay;
+        if (currentCampaign.revision !== expectedRevision || (currentCampaign.activeTimelineId || 'tl_root') !== expectedTimelineId) {
+          throw new Error('CONCURRENT_STATE_CONFLICT: A revisão ou a linha temporal de origem mudou.');
+        }
+        const next = advanceWorldTime(currentCampaign.worldTime, turn.advanceMinutes);
+        if (Object.entries(next).some(([key, value]) => result.nextWorldTime[key as keyof typeof next] !== value) ||
+            result.nextRevision !== expectedRevision + 1 ||
+            result.playerEntry.sequence !== currentCampaign.lastSequence + 1 ||
+            result.engineEntry.sequence !== currentCampaign.lastSequence + 2 ||
+            result.nextLastSequence !== currentCampaign.lastSequence + 3 ||
+            result.event.sequence !== result.nextLastSequence ||
+            [result.event, result.playerEntry, result.engineEntry].some((entry) =>
+              entry.campaignId !== campaignId || entry.ownerId !== currentCampaign.ownerId || entry.timelineId !== expectedTimelineId)) {
+          throw new Error('TURN_ID_CONFLICT');
+        }
+      }
+
+      if (currentCampaign.revision !== expectedRevision) {
+        throw new Error(
+          `CONCURRENT_STATE_CONFLICT: A revisão da campanha avançou (${currentCampaign.revision} vs esperada ${expectedRevision}). A narrativa gerada foi descartada para evitar inconsistência temporal.`,
+        );
+      }
+
+      const currentTimeline = currentCampaign.activeTimelineId || 'tl_root';
+      if (currentTimeline !== expectedTimelineId) {
+        throw new Error(
+          `CONCURRENT_STATE_CONFLICT: A linha temporal ativa mudou (${currentTimeline} vs esperada ${expectedTimelineId}). A narrativa gerada foi descartada.`,
+        );
+      }
+
+      if (currentCampaign.status === 'archived') {
+        throw new Error('Campanha arquivada não aceita novas ações.');
+      }
+
+      tx.update(campaignRef, {
+        worldTime: result.nextWorldTime,
+        lastSequence: result.nextLastSequence,
+        revision: result.nextRevision,
+        updatedAt: serverTimestamp(),
+      });
+
+      const playerId = ids?.player ?? result.playerEntry.id;
+      const engineId = ids?.engine ?? result.engineEntry.id;
+      const eventId = ids?.event ?? result.event.id;
+      tx.set(doc(targetDb, campaignPath, 'narrative', playerId), {
+        ...result.playerEntry,
+        id: playerId,
+        createdAt: serverTimestamp(),
+      });
+
+      tx.set(doc(targetDb, campaignPath, 'narrative', engineId), {
+        ...result.engineEntry,
+        id: engineId,
+        createdAt: serverTimestamp(),
+      });
+
+      tx.set(doc(targetDb, campaignPath, 'events', eventId), {
+        ...result.event,
+        id: eventId,
+        createdAt: serverTimestamp(),
+      });
+    });
+  } catch (error) {
+    if (ids && error && typeof error === 'object' && 'code' in error && error.code === 'permission-denied') {
+      // A competing commit may have turned the creates into forbidden updates.
+      // Recover only an authenticated, matching receipt. Never retry the writes here.
+      const replay = await runTransaction(targetDb, async (tx) => {
+        const snap = await tx.get(campaignRef);
+        if (!snap.exists() || snap.data().ownerId !== result.event.ownerId) return undefined;
+        return readReceipt(tx, snap.data().ownerId);
+      }).catch(() => undefined);
+      if (replay) return replay;
+      if (replay === null) throw new Error('TURN_ID_CONFLICT');
+    }
+    handleFirestoreError(
+      error,
+      OperationType.WRITE,
+      `${campaignPath} [transação: validação de revisão ${expectedRevision} e timeline ${expectedTimelineId}]`,
     );
   }
 }

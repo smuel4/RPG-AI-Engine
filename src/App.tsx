@@ -1,5 +1,6 @@
 ﻿import { useEffect, useState } from 'react';
 import { FolderPlus, Sparkles } from 'lucide-react';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import { useAuth } from './hooks/useAuth';
 import { DevAuthProbe } from './components/DevAuthProbe';
 import {
@@ -22,6 +23,7 @@ import {
   commitCurrencyMutation,
   commitInventoryMutation,
   commitPlayerAction,
+  commitPlayerActionTransaction,
   commitTimeAdvance,
   createCampaignBundle,
   deleteCampaignWithSubcollections,
@@ -31,7 +33,10 @@ import {
   subscribeUserCampaigns,
   testPersistenceFailure,
 } from './services/campaignRepository';
-import { formatPersistenceError } from './services/firebaseClient';
+import { NarratorRequestError, requestNarratorTurn } from './services/narratorClient';
+import { clearPendingTurn, loadPendingTurn, releaseRejectedPilotTurn, savePendingTurn } from './services/pendingTurn';
+import { checkTurnRevision, type TurnIdentity } from './engine/turnIdentity';
+import { auth, formatPersistenceError, localFreixo } from './services/firebaseClient';
 import type {
   Campaign,
   Checkpoint,
@@ -72,6 +77,14 @@ function writeCampaignIdToUrl(campaignId: string | null) {
   window.history.replaceState({}, '', url.toString());
 }
 
+function readPendingTurn(ownerId: string, campaignId: string): TurnIdentity | null {
+  try {
+    return loadPendingTurn(window.sessionStorage, ownerId, campaignId);
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
   const { user, loading: authLoading, authError, signInWithGoogle, logout, clearAuthError } =
     useAuth();
@@ -93,6 +106,9 @@ export default function App() {
   const [isMutating, setIsMutating] = useState(false);
   const [errorState, setErrorState] = useState<PersistenceErrorState | string | null>(null);
   const [lastFailedAction, setLastFailedAction] = useState<(() => Promise<void>) | null>(null);
+  const [conflictingTurnId, setConflictingTurnId] = useState<string | null>(null);
+  const pendingTurn = user?.emailVerified && activeCampaign?.ownerId === user.uid &&
+    activeCampaign.id === selectedCampaignId ? readPendingTurn(user.uid, activeCampaign.id) : null;
 
   const [mobileTab, setMobileTab] = useState<MobileTab>('narrative');
   const [campaignHubOpen, setCampaignHubOpen] = useState(false);
@@ -178,6 +194,8 @@ export default function App() {
   const executeMutation = async (
     task: () => Promise<void>,
     errorTitle: string,
+    offerRetry = true,
+    describeError?: (error: unknown) => PersistenceErrorState,
   ): Promise<boolean> => {
     setErrorState(null);
     setLastFailedAction(null);
@@ -189,8 +207,8 @@ export default function App() {
       return true;
     } catch (err) {
       setSyncState('error');
-      setErrorState(formatPersistenceError(err, errorTitle));
-      setLastFailedAction(() => async () => {
+      setErrorState(describeError ? describeError(err) : formatPersistenceError(err, errorTitle));
+      if (offerRetry) setLastFailedAction(() => async () => {
         await executeMutation(task, errorTitle);
       });
       return false;
@@ -246,17 +264,99 @@ export default function App() {
     actionText: string,
     advanceMinutes: number,
   ): Promise<boolean> => {
-    if (!activeCampaign) return false;
-    const rule = processPlayerAction(activeCampaign, inventory, npcs, actionText, advanceMinutes);
-    if (!rule.ok) {
-      setErrorState(rule.error);
+    if (!activeCampaign || !user?.emailVerified || activeCampaign.ownerId !== user.uid ||
+        activeCampaign.id !== selectedCampaignId || isMutating) return false;
+    if (readPendingTurn(user.uid, activeCampaign.id)) {
+      setErrorState('Retome o turno pendente antes de enviar outra ação nesta campanha.');
       return false;
     }
+    const declaredAction = actionText.trim();
+    if (!declaredAction || declaredAction.length > 800 ||
+        !Number.isSafeInteger(advanceMinutes) || advanceMinutes < 0 || advanceMinutes > 720) {
+      setErrorState('Informe uma ação de até 800 caracteres e uma duração de 0 a 720 minutos.');
+      return false;
+    }
+    const identity = {
+      turnId: globalThis.crypto.randomUUID(),
+      campaignId: activeCampaign.id,
+      declaredAction,
+      advanceMinutes,
+      expectedRevision: activeCampaign.revision,
+      baseTimelineId: activeCampaign.activeTimelineId || 'tl_root',
+    };
 
-    return executeMutation(
-      () => commitPlayerAction(activeCampaign.id, rule.data),
-      'Falha ao registrar ação no Firestore',
-    );
+    try {
+      savePendingTurn(window.sessionStorage, user.uid, identity);
+    } catch {
+      setErrorState('Não foi possível guardar a identidade do turno nesta aba. A ação não foi enviada.');
+      return false;
+    }
+    return submitPlayerTurn(identity);
+  };
+
+  const submitPlayerTurn = async (identity: TurnIdentity): Promise<boolean> => {
+    if (!activeCampaign || !user?.emailVerified || activeCampaign.ownerId !== user.uid ||
+        activeCampaign.id !== identity.campaignId || selectedCampaignId !== identity.campaignId || isMutating ||
+        readPendingTurn(user.uid, identity.campaignId)?.turnId !== identity.turnId) return false;
+    const { declaredAction: actionText, advanceMinutes } = identity;
+    return executeMutation(async () => {
+      // 1. Obtém token autenticado do Firebase
+      const token = await user.getIdToken();
+
+      // 2. Solicita a narrativa oficial ao servidor seguro (contexto lido no Firestore do banco nomeado)
+      const turn = await requestNarratorTurn(token, {
+        campaignId: activeCampaign.id,
+        declaredAction: actionText,
+        advanceMinutes,
+        turn: identity,
+      });
+      if (turn.turnId !== identity.turnId || turn.expectedRevision !== identity.expectedRevision ||
+          turn.baseTimelineId !== identity.baseTimelineId) throw new Error('TURN_ID_CONFLICT');
+      if (turn.mode === 'replay') {
+        clearPendingTurn(window.sessionStorage, user.uid, identity);
+        return;
+      }
+      if (!checkTurnRevision(identity, activeCampaign)) {
+        throw new Error('O estado exibido da campanha mudou. Aguarde a sincronização antes de retomar o turno.');
+      }
+
+      // 3. Aplica regras estruturadas locais com o texto narrativo oficial
+      const rule = processPlayerAction(
+        activeCampaign,
+        inventory,
+        npcs,
+        actionText,
+        advanceMinutes,
+        turn.narration,
+      );
+
+      if (!rule.ok) {
+        throw new Error(rule.error);
+      }
+
+      // 4. Confirmação transacional estrita (rejeita se revisão ou timeline divergirem da geração)
+      await commitPlayerActionTransaction(
+        activeCampaign.id,
+        rule.data,
+        turn.expectedRevision,
+        turn.baseTimelineId,
+        { turn: identity },
+      );
+      clearPendingTurn(window.sessionStorage, user.uid, identity);
+    }, 'Falha ao registrar ação narrada', false, (error) => {
+      if (localFreixo && releaseRejectedPilotTurn(window.sessionStorage, user.uid, identity, error)) {
+        setConflictingTurnId(null);
+        setSyncState('synced');
+        return { title: 'Ação recusada', message: error.message + ' Corrija a ação no campo de texto e envie novamente.', retryable: false };
+      }
+      if (error instanceof NarratorRequestError &&
+          (error.code === 'TURN_ID_CONFLICT' || error.code === 'CONCURRENT_STATE_CONFLICT')) {
+        setConflictingTurnId(identity.turnId);
+        return { title: 'Conflito de turno', message: 'O estado da campanha mudou. Confira o histórico antes de descartar a tentativa local.', retryable: false };
+      }
+      if (!localFreixo) return formatPersistenceError(error, 'Falha ao registrar ação narrada');
+      return { title: 'Confirmação indisponível', message: 'Não foi possível verificar o resultado. Use Retomar turno para consultar ou reenviar a mesma ação.', retryable: false };
+    });
   };
 
   const handleInventoryMutation = async (
@@ -362,6 +462,23 @@ export default function App() {
   }
 
   if (!user) {
+    if (localFreixo) return (
+      <main className="min-h-screen bg-[#0B0D12] text-[#EDE8DC] grid place-items-center p-6">
+        <form className="grid w-full max-w-sm gap-4" onSubmit={(event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          setErrorState(null);
+          void signInWithEmailAndPassword(auth, String(form.get('email')), String(form.get('password')))
+            .catch(() => setErrorState('Use a conta local exibida no PowerShell.'));
+        }}>
+          <h1 className="text-xl">Freixo local</h1>
+          <label>E-mail local<input required name="email" type="email" className="block w-full border p-2" /></label>
+          <label>Senha local<input required name="password" type="password" className="block w-full border p-2" /></label>
+          {typeof errorState === 'string' && <p role="alert">{errorState}</p>}
+          <button className="border p-2" type="submit">Entrar no piloto</button>
+        </form>
+      </main>
+    );
     return (
       <AuthScreen
         loading={authLoading}
@@ -374,6 +491,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B0D12] text-[#EDE8DC] flex flex-col">
+      {localFreixo && <p className="px-6 py-2 text-sm">Freixo local · Firebase emulado</p>}
       <TopBar
         campaignName={activeCampaign?.name ?? null}
         syncState={syncState}
@@ -440,6 +558,21 @@ export default function App() {
       )}
 
       <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 lg:px-6 py-5 space-y-4">
+        {pendingTurn && (
+          <div className="rounded-lg border border-[#D4AF37]/30 p-4 text-sm">
+            <p>Turno pendente: {pendingTurn.declaredAction}</p>
+            {conflictingTurnId === pendingTurn.turnId ? (
+              <button type="button" disabled={isMutating} className="mt-2 underline" onClick={() => {
+                clearPendingTurn(window.sessionStorage, user.uid, pendingTurn);
+                setConflictingTurnId(null);
+                setErrorState(null);
+              }}>Descartar tentativa local</button>
+            ) : (
+              <button type="button" disabled={isMutating} className="mt-2 underline"
+                onClick={() => void submitPlayerTurn(pendingTurn)}>Retomar turno</button>
+            )}
+          </div>
+        )}
         {errorState && (
           <ErrorBanner
             error={errorState}
@@ -523,9 +656,13 @@ export default function App() {
                   } h-full`}
                 >
                   <NarrativeStage
+                    key={activeCampaign.id}
                     campaign={activeCampaign}
                     entries={narrativeAudit.active}
                     isMutating={isMutating}
+                    pendingAction={pendingTurn?.declaredAction}
+                    confirmedAction={localFreixo ? eventAudit.active.find((event) =>
+                      event.type === 'PLAYER_ACTION' && event.sequence === activeCampaign.lastSequence) : undefined}
                     onSubmitAction={handlePlayerAction}
                   />
                 </div>
@@ -556,7 +693,7 @@ export default function App() {
         )}
       </main>
 
-      <DevAuthProbe user={user} />
+      <DevAuthProbe user={user} campaignId={activeCampaign?.id ?? null} />
 
       <CampaignHubModal
         isOpen={campaignHubOpen}
@@ -587,4 +724,7 @@ export default function App() {
     </div>
   );
 }
+
+
+
 

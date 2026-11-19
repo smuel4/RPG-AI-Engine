@@ -114,6 +114,7 @@ export interface NarrativeEntry {
   authorRole: NarrativeAuthorRole;
   content: string;
   worldTimeLabel: string;
+  privateRecipientId?: string;
   createdAt?: unknown;
 }
 

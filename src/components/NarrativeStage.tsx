@@ -1,27 +1,32 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Send } from 'lucide-react';
-import type { Campaign, NarrativeEntry } from '../types/game';
+import type { Campaign, GameEvent, NarrativeEntry } from '../types/game';
 
 interface NarrativeStageProps {
   campaign: Campaign;
   entries: NarrativeEntry[];
   isMutating: boolean;
+  pendingAction?: string;
+  confirmedAction?: GameEvent;
   onSubmitAction: (actionText: string, advanceMinutes: number) => Promise<boolean>;
 }
 
 const ROLE_LABELS: Record<NarrativeEntry['authorRole'], string> = {
   system_seed: 'Ambientação Inicial',
   player_action: 'Decisão do Jogador',
-  engine_response: 'Resposta do Motor (Teste Fixo)',
+  engine_response: 'Narrador',
 };
 
 export function NarrativeStage({
   campaign,
   entries,
   isMutating,
+  pendingAction,
+  confirmedAction,
   onSubmitAction,
 }: NarrativeStageProps) {
-  const [actionText, setActionText] = useState('');
+  const [actionText, setActionText] = useState(pendingAction ?? '');
+  const cannotSubmit = Boolean(pendingAction) || campaign.status === 'archived' || isMutating;
   const [advanceMinutes, setAdvanceMinutes] = useState<number>(10);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -31,6 +36,7 @@ export function NarrativeStage({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (cannotSubmit) return;
     const ok = await onSubmitAction(actionText, advanceMinutes);
     if (ok) {
       setActionText('');
@@ -107,6 +113,14 @@ export function NarrativeStage({
         <div ref={bottomRef} />
       </div>
 
+      {confirmedAction && (
+        <div role="status" className="border-t border-white/10 px-4 py-3 text-sm text-[#C8C3B8]">
+          <p className="font-semibold text-[#F6E8B1]">Última ação confirmada</p>
+          <p>{confirmedAction.summary}</p>
+          <p>{confirmedAction.afterSummary}</p>
+        </div>
+      )}
+
       {/* Campo livre de ação do jogador */}
       <form
         onSubmit={handleSubmit}
@@ -149,7 +163,7 @@ export function NarrativeStage({
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                if (actionText.trim() && !isMutating && campaign.status !== 'archived') {
+                if (actionText.trim() && !cannotSubmit) {
                   void handleSubmit(e);
                 }
               }
@@ -160,7 +174,7 @@ export function NarrativeStage({
 
           <button
             type="submit"
-            disabled={campaign.status === 'archived' || isMutating}
+            disabled={cannotSubmit}
             className="sm:self-end px-5 py-2.5 min-h-[44px] inline-flex items-center justify-center gap-2 text-sm font-semibold rounded-lg bg-[#D4AF37] text-[#0B0D12] hover:bg-[#E2C258] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F2E2B0]"
           >
             <Send className="w-4 h-4" aria-hidden="true" />

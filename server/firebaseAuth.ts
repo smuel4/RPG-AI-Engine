@@ -2,7 +2,8 @@
 import { getAuth } from 'firebase-admin/auth';
 
 export async function verifyFirebasePlayer(
-  authorization?: string
+  authorization?: string,
+  requireVerifiedEmail = false,
 ): Promise<string | null> {
   const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? '');
   if (!match) return null;
@@ -23,6 +24,7 @@ export async function verifyFirebasePlayer(
     );
 
   const decoded = await getAuth(app).verifyIdToken(match[1]);
+  if (requireVerifiedEmail && decoded.email_verified !== true) return null;
   return decoded.uid;
 }
 

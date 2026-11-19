@@ -1,12 +1,22 @@
 import { initializeApp } from 'firebase/app';
-import { GoogleAuthProvider, getAuth } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import { connectAuthEmulator, GoogleAuthProvider, getAuth } from 'firebase/auth';
+import { connectFirestoreEmulator, doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import type { PersistenceErrorState } from '../types/game';
 
-const app = initializeApp(firebaseConfig);
+export const localFreixo = import.meta.env.VITE_FREIXO_LOCAL === 'true';
+if (localFreixo && window.location.hostname !== '127.0.0.1') {
+  throw new Error('Freixo local só pode abrir em 127.0.0.1.');
+}
+const app = localFreixo ? initializeApp({
+  apiKey: 'demo', projectId: 'demo-rpg-ai-engine', appId: 'freixo-local',
+}, 'freixo-local') : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+if (localFreixo) {
+  connectFirestoreEmulator(db, '127.0.0.1', 8080);
+  connectAuthEmulator(auth, 'http://127.0.0.1:9099');
+}
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
@@ -99,10 +109,13 @@ export function formatPersistenceError(
   const diagnosticSuffix =
     diagnosticParts.length > 0 ? ` [${diagnosticParts.join(' · ')}]` : '';
 
-  if (underlyingMessage.includes('CONCURRENT_REVISION_CONFLICT')) {
+  if (
+    underlyingMessage.includes('CONCURRENT_REVISION_CONFLICT') ||
+    underlyingMessage.includes('CONCURRENT_STATE_CONFLICT')
+  ) {
     return {
       title: 'Conflito de revisão concorrente',
-      message: `${underlyingMessage.replace(/^CONCURRENT_REVISION_CONFLICT:\s*/i, '')} Nenhuma alteração parcial foi aplicada.${diagnosticSuffix}`,
+      message: `${underlyingMessage.replace(/^CONCURRENT_(REVISION|STATE)_CONFLICT:\s*/i, '')} Nenhuma alteração parcial foi aplicada.${diagnosticSuffix}`,
       code: 'aborted',
       retryable: true,
     };
