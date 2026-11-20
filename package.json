@@ -9,7 +9,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "verify:engine": "node --import tsx --test --test-reporter=spec tests/turnPlanner.test.ts tests/turnIdentity.test.ts tests/persistPilotTurn.test.ts tests/npcRoutine.test.ts tests/pendingTurn.test.ts tests/echoArcFreeTurn.test.ts && npm run lint",
+    "verify:engine:http": "node scripts/verify-engine-http.mjs"
   },
   "dependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",

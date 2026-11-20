@@ -138,14 +138,15 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     assert.deepEqual((await state()).worldTime, advanceWorldTime(morning, 5));
     const beforeInvalidSequence = await snapshot();
     await assert.rejects(submit('Vou até o poço e examino a bancada da cozinha.'),
-      { code: 'PILOT_OBJECT_OUT_OF_REACH', message: /^Etapa 2/ });
-    assert.deepEqual(await snapshot(), beforeInvalidSequence);
+      { code: 'PILOT_OBJECT_OUT_OF_REACH', message: /^Etapa 2\..*Vá até lá antes de examiná-lo/ },
+      'B — a segunda etapa deve indicar por que o objeto está fora de alcance e como prosseguir');
+    assert.deepEqual(await snapshot(), beforeInvalidSequence, 'B — a recusa deve preservar a campanha e seus documentos');
     const journey = await submit('Vou até o poço e observo o poço.');
     const afterJourney = await snapshot();
-    assert.equal((await journey.send()).narration, journey.result.narration);
-    assert.deepEqual(await snapshot(), afterJourney);
-    assert.equal((await state()).currentLocation, villageWell);
-    assert.deepEqual((await state()).worldTime, advanceWorldTime(morning, 11));
+    assert.equal((await journey.send()).narration, journey.result.narration, 'C — o reenvio deve retornar a narração anterior');
+    assert.deepEqual(await snapshot(), afterJourney, 'C — o reenvio deve preservar a campanha e seus documentos');
+    assert.equal((await state()).currentLocation, villageWell, 'A — o turno deve terminar no poço');
+    assert.deepEqual((await state()).worldTime, advanceWorldTime(morning, 11), 'A — o deslocamento deve levar seis minutos');
     const before = await snapshot();
     for (const [action, code] of [['Examino a bancada.', 'PILOT_OBJECT_OUT_OF_REACH'],
       ['Examino aquele objeto.', 'PILOT_OBJECT_AMBIGUOUS'], ['Examino o jarro.', 'PILOT_OBJECT_UNREGISTERED']]) {

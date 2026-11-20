@@ -4,6 +4,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 import { persistPilotTurn, SERVER_PILOT_ID } from '../server/persistPilotTurn';
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import { advanceWorldTime } from '../src/engine/rulesEngine';
+import { turnDocumentIds } from '../src/engine/turnIdentity';
 import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
 import { buildNarratorContext } from '../server/narratorMemory';
 import { familyKitchen } from '../scripts/echoArcContinuityFixture';
@@ -352,42 +353,65 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
   };
   const dispatch = (action: string, narrate: Parameters<typeof persistPilotTurn>[4]) =>
     persistPilotTurn(db, sequenceCatalog, 'dono', next(action), narrate);
-  const untouched = [...docs];
-  for (const [declared, code, step] of [
-    ['Vou até a casa e examino o jarro.', 'PILOT_OBJECT_UNREGISTERED', 2],
-    ['Vou até a casa e examino aquele objeto.', 'PILOT_OBJECT_AMBIGUOUS', 2],
-    ['Observo o poço e examino a bancada.', 'PILOT_OBJECT_OUT_OF_REACH', 2],
-    ['Pergunto se ela está bem, depois vou até a casa.', 'PILOT_SEQUENCE_NEEDS_REPLY', 1],
-    ['Observo o poço; examino o poço; observo o poço.', 'PILOT_SEQUENCE_LIMIT', 3],
-  ] as const) {
-    await assert.rejects(dispatch(declared, async () => assert.fail('planejamento inválido não narra')), { code, step });
-    assert.deepEqual([...docs], untouched);
-  }
-  await dispatch('Observo o poço e examino o poço.', async () => 'O poço tem uma borda de pedra.');
+  await t.test('B — recusa na segunda etapa preserva o estado e libera o próximo comando', async () => {
+    const untouched = [...docs];
+    for (const [declared, code, step] of [
+      ['Vou até a casa e examino o jarro.', 'PILOT_OBJECT_UNREGISTERED', 2],
+      ['Vou até a casa e examino aquele objeto.', 'PILOT_OBJECT_AMBIGUOUS', 2],
+      ['Observo o poço e examino a bancada.', 'PILOT_OBJECT_OUT_OF_REACH', 2],
+      ['Pergunto se ela está bem, depois vou até a casa.', 'PILOT_SEQUENCE_NEEDS_REPLY', 1],
+      ['Observo o poço; examino o poço; observo o poço.', 'PILOT_SEQUENCE_LIMIT', 3],
+    ] as const) {
+      await assert.rejects(dispatch(declared, async () => assert.fail('planejamento inválido não narra')),
+        { code, step }, declared);
+      assert.deepEqual([...docs], untouched, 'Estado e documentos após a recusa de: ' + declared);
+    }
+    await dispatch('Observo o poço e examino o poço.', async () => 'O poço tem uma borda de pedra.');
+  });
   await dispatch('Observo o poço; digo a Lira: Bom dia.', async (_scene, intent, present, _relations, _history, declared) => {
     assert.ok(present.npcs.some(({ name }) => name === 'Lira'));
     if (declared.startsWith('digo')) assert.match(intent, /reação de Lira/);
     return 'Lira está junto à borda.';
   });
-  const beforeSequence = docs.get(path) as typeof campaign;
-  const chain = next('Vou até a casa e depois examino a bancada.');
-  let count = 0;
-  const chained = await persistPilotTurn(db, sequenceCatalog, 'dono', chain, async (scene, intent) => {
-    count++;
-    assert.equal(scene.currentLocation, home);
-    if (count === 2) assert.match(intent, /Bancada de madeira/);
-    return 'Há marcas na madeira.';
+  await dispatch('Vou até a casa e depois examino a bancada.',
+    async (scene, intent, _present, _relations, _history, declared) => {
+      assert.equal(scene.currentLocation, home);
+      if (declared.startsWith('examino')) assert.match(intent, /Bancada de madeira/);
+      return 'Há marcas na madeira.';
+    });
+  await t.test('A — deslocamento e observação em ordem, com evento e recibo', async (scenario) => {
+    const beforeSequence = docs.get(path) as typeof campaign;
+    const chain = next('Vou até o poço e observo o poço.');
+    const actions: string[] = [];
+    const chained = await persistPilotTurn(db, sequenceCatalog, 'dono', chain,
+      async (scene, _intent, _present, _relations, _history, declared) => {
+        assert.equal(scene.currentLocation, villageWell, 'Local projetado durante: ' + declared);
+        actions.push(declared);
+        return 'O poço tem uma borda de pedra.';
+      });
+    assert.deepEqual(actions, ['Vou até o poço', 'observo o poço.']);
+    const afterSequence = docs.get(path) as typeof campaign;
+    assert.equal(afterSequence.currentLocation, villageWell);
+    assert.equal(afterSequence.revision, beforeSequence.revision + 1);
+    assert.equal(afterSequence.lastSequence, beforeSequence.lastSequence + 3);
+    assert.deepEqual(afterSequence.worldTime, advanceWorldTime(beforeSequence.worldTime, 6));
+    const ids = await turnDocumentIds(chain);
+    assert.partialDeepStrictEqual(docs.get(path + '/events/' + ids.event), {
+      type: 'PLAYER_ACTION', sequence: afterSequence.lastSequence,
+    });
+    assert.partialDeepStrictEqual(docs.get(path + '/turnReceipts/' + chain.turnId), {
+      turn: chain, playerEntryId: ids.player, outcome: { location: villageWell, elapsedMinutes: 6 },
+      plan: { kind: 'sequence', steps: [{ intent: { kind: 'travel' } }, { kind: 'observation' }] },
+    });
+
+    await scenario.test('C — replay devolve a narração sem duplicar efeitos', async () => {
+      const saved = [...docs];
+      const replay = await persistPilotTurn(db, sequenceCatalog, 'dono', chain, async () => assert.fail('replay não narra'));
+      assert.equal(replay.mode, 'replay');
+      assert.equal(replay.narration, chained.narration);
+      assert.deepEqual([...docs], saved);
+    });
   });
-  assert.equal(count, 2);
-  const afterSequence = docs.get(path) as typeof campaign;
-  assert.equal(afterSequence.currentLocation, home);
-  assert.equal(afterSequence.revision, beforeSequence.revision + 1);
-  assert.equal(afterSequence.lastSequence, beforeSequence.lastSequence + 3);
-  assert.deepEqual(afterSequence.worldTime, advanceWorldTime(beforeSequence.worldTime, 6));
-  const saved = [...docs];
-  const replay = await persistPilotTurn(db, sequenceCatalog, 'dono', chain, async () => assert.fail('replay não narra'));
-  assert.equal(replay.narration, chained.narration);
-  assert.deepEqual([...docs], saved);
 });
 
 test('avanço curto conserva o dia da semana e meia-noite avança o calendário', () => {
