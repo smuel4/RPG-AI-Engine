@@ -105,6 +105,11 @@ export interface NpcRecord {
   updatedAt?: unknown;
 }
 
+export interface PilotFocus {
+  kind: 'npc' | 'object' | 'place';
+  id: string;
+}
+
 export interface NarrativeEntry {
   id: string;
   ownerId: string;
@@ -115,6 +120,7 @@ export interface NarrativeEntry {
   content: string;
   worldTimeLabel: string;
   privateRecipientId?: string;
+  pilotFocus?: PilotFocus[];
   createdAt?: unknown;
 }
 

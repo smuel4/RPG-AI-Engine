@@ -34,8 +34,8 @@ import {
   testPersistenceFailure,
 } from './services/campaignRepository';
 import { NarratorRequestError, requestNarratorTurn } from './services/narratorClient';
-import { clearPendingTurn, loadPendingTurn, releaseRejectedPilotTurn, savePendingTurn } from './services/pendingTurn';
-import { checkTurnRevision, type TurnIdentity } from './engine/turnIdentity';
+import { clearPendingTurn, loadPendingTurn, releaseRejectedPilotTurn, savePendingTurn, type PendingTurn } from './services/pendingTurn';
+import { checkTurnRevision } from './engine/turnIdentity';
 import { auth, formatPersistenceError, localFreixo } from './services/firebaseClient';
 import type {
   Campaign,
@@ -77,7 +77,7 @@ function writeCampaignIdToUrl(campaignId: string | null) {
   window.history.replaceState({}, '', url.toString());
 }
 
-function readPendingTurn(ownerId: string, campaignId: string): TurnIdentity | null {
+function readPendingTurn(ownerId: string, campaignId: string): PendingTurn | null {
   try {
     return loadPendingTurn(window.sessionStorage, ownerId, campaignId);
   } catch {
@@ -107,8 +107,12 @@ export default function App() {
   const [errorState, setErrorState] = useState<PersistenceErrorState | string | null>(null);
   const [lastFailedAction, setLastFailedAction] = useState<(() => Promise<void>) | null>(null);
   const [conflictingTurnId, setConflictingTurnId] = useState<string | null>(null);
+  const [clarification, setClarification] = useState<{ ownerId: string; turn: PendingTurn; message: string } | null>(null);
+  const [gameplayFeedback, setGameplayFeedback] = useState<{ ownerId: string; campaignId: string; message: string } | null>(null);
   const pendingTurn = user?.emailVerified && activeCampaign?.ownerId === user.uid &&
     activeCampaign.id === selectedCampaignId ? readPendingTurn(user.uid, activeCampaign.id) : null;
+  const activeClarification = clarification?.ownerId === user?.uid &&
+    clarification?.turn.campaignId === selectedCampaignId ? clarification : null;
 
   const [mobileTab, setMobileTab] = useState<MobileTab>('narrative');
   const [campaignHubOpen, setCampaignHubOpen] = useState(false);
@@ -195,12 +199,13 @@ export default function App() {
     task: () => Promise<void>,
     errorTitle: string,
     offerRetry = true,
-    describeError?: (error: unknown) => PersistenceErrorState,
+    describeError?: (error: unknown) => PersistenceErrorState | null,
+    showSavingInHeader = true,
   ): Promise<boolean> => {
     setErrorState(null);
     setLastFailedAction(null);
     setIsMutating(true);
-    setSyncState('saving');
+    if (showSavingInHeader) setSyncState('saving');
     try {
       await task();
       setSyncState('synced');
@@ -276,7 +281,7 @@ export default function App() {
       setErrorState('Informe uma ação de até 800 caracteres e uma duração de 0 a 720 minutos.');
       return false;
     }
-    const identity = {
+    const identity: PendingTurn = activeClarification ? { ...activeClarification.turn, declaredAction } : {
       turnId: globalThis.crypto.randomUUID(),
       campaignId: activeCampaign.id,
       declaredAction,
@@ -294,11 +299,12 @@ export default function App() {
     return submitPlayerTurn(identity);
   };
 
-  const submitPlayerTurn = async (identity: TurnIdentity): Promise<boolean> => {
+  const submitPlayerTurn = async (identity: PendingTurn): Promise<boolean> => {
     if (!activeCampaign || !user?.emailVerified || activeCampaign.ownerId !== user.uid ||
         activeCampaign.id !== identity.campaignId || selectedCampaignId !== identity.campaignId || isMutating ||
         readPendingTurn(user.uid, identity.campaignId)?.turnId !== identity.turnId) return false;
     const { declaredAction: actionText, advanceMinutes } = identity;
+    setGameplayFeedback(null);
     return executeMutation(async () => {
       // 1. Obtém token autenticado do Firebase
       const token = await user.getIdToken();
@@ -309,11 +315,13 @@ export default function App() {
         declaredAction: actionText,
         advanceMinutes,
         turn: identity,
+        clarificationToken: identity.clarificationToken,
       });
       if (turn.turnId !== identity.turnId || turn.expectedRevision !== identity.expectedRevision ||
           turn.baseTimelineId !== identity.baseTimelineId) throw new Error('TURN_ID_CONFLICT');
       if (turn.mode === 'replay') {
         clearPendingTurn(window.sessionStorage, user.uid, identity);
+        if (identity.clarificationToken) setClarification(null);
         return;
       }
       if (!checkTurnRevision(identity, activeCampaign)) {
@@ -347,7 +355,29 @@ export default function App() {
       if (localFreixo && releaseRejectedPilotTurn(window.sessionStorage, user.uid, identity, error)) {
         setConflictingTurnId(null);
         setSyncState('synced');
+        const clarificationToken = error.clarificationToken ?? identity.clarificationToken;
+        if (clarificationToken && ['PILOT_OBJECT_AMBIGUOUS', 'PILOT_OBJECT_OUT_OF_REACH',
+          'PILOT_OBJECT_UNREGISTERED'].includes(error.code ?? '')) {
+          setClarification({ ownerId: user.uid, turn: { ...identity, clarificationToken },
+            message: error.message });
+          return null;
+        }
+        if (identity.clarificationToken) {
+          setClarification(null);
+          return { title: 'Esclarecimento encerrado', message: error.message, retryable: false };
+        }
+        if (error.gameplayFeedback) {
+          setGameplayFeedback({ ownerId: user.uid, campaignId: identity.campaignId, message: error.message });
+          return null;
+        }
         return { title: 'Ação recusada', message: error.message + ' Corrija a ação no campo de texto e envie novamente.', retryable: false };
+      }
+      if (identity.clarificationToken && error instanceof NarratorRequestError &&
+          error.code === 'CONCURRENT_STATE_CONFLICT') {
+        clearPendingTurn(window.sessionStorage, user.uid, identity);
+        setClarification(null);
+        return { title: 'Esclarecimento encerrado',
+          message: 'O estado da campanha mudou. Envie uma nova ação.', retryable: false };
       }
       if (error instanceof NarratorRequestError &&
           (error.code === 'TURN_ID_CONFLICT' || error.code === 'CONCURRENT_STATE_CONFLICT')) {
@@ -356,7 +386,7 @@ export default function App() {
       }
       if (!localFreixo) return formatPersistenceError(error, 'Falha ao registrar ação narrada');
       return { title: 'Confirmação indisponível', message: 'Não foi possível verificar o resultado. Use Retomar turno para consultar ou reenviar a mesma ação.', retryable: false };
-    });
+    }, false);
   };
 
   const handleInventoryMutation = async (
@@ -490,7 +520,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0B0D12] text-[#EDE8DC] flex flex-col">
+    <div className={(activeCampaign ? 'h-dvh overflow-hidden ' : 'min-h-screen ') + 'bg-[#0B0D12] text-[#EDE8DC] flex flex-col'}>
       {localFreixo && <p className="px-6 py-2 text-sm">Freixo local · Firebase emulado</p>}
       <TopBar
         campaignName={activeCampaign?.name ?? null}
@@ -505,7 +535,7 @@ export default function App() {
 
       {/* Navegação mobile compacta */}
       {activeCampaign && (
-        <div className="lg:hidden border-b border-white/10 bg-[#0E121A] px-3 py-2 space-y-2">
+        <div className="lg:hidden shrink-0 border-b border-white/10 bg-[#0E121A] px-3 py-2 space-y-2">
           <div className="grid grid-cols-3 gap-1 bg-[#0B0D12] p-1 rounded-lg">
             {(
               [
@@ -518,6 +548,7 @@ export default function App() {
                 key={tab.id}
                 type="button"
                 onClick={() => setMobileTab(tab.id)}
+                aria-pressed={mobileTab === tab.id}
                 className={`py-2 text-xs font-medium rounded-md transition-colors cursor-pointer ${
                   mobileTab === tab.id
                     ? 'bg-[#D4AF37] text-[#0B0D12] font-semibold'
@@ -557,28 +588,16 @@ export default function App() {
         </div>
       )}
 
-      <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 lg:px-6 py-5 space-y-4">
-        {pendingTurn && (
-          <div className="rounded-lg border border-[#D4AF37]/30 p-4 text-sm">
-            <p>Turno pendente: {pendingTurn.declaredAction}</p>
-            {conflictingTurnId === pendingTurn.turnId ? (
-              <button type="button" disabled={isMutating} className="mt-2 underline" onClick={() => {
-                clearPendingTurn(window.sessionStorage, user.uid, pendingTurn);
-                setConflictingTurnId(null);
-                setErrorState(null);
-              }}>Descartar tentativa local</button>
-            ) : (
-              <button type="button" disabled={isMutating} className="mt-2 underline"
-                onClick={() => void submitPlayerTurn(pendingTurn)}>Retomar turno</button>
-            )}
-          </div>
-        )}
+      <main className={'flex-1 min-h-0 max-w-[1600px] w-full mx-auto px-2 py-2 lg:px-6 lg:py-5 ' +
+        (activeCampaign ? 'flex flex-col gap-2 lg:gap-4' : 'space-y-4')}>
         {errorState && (
-          <ErrorBanner
-            error={errorState}
-            onDismiss={() => setErrorState(null)}
-            onRetry={lastFailedAction ? () => void lastFailedAction() : undefined}
-          />
+          <div className={activeCampaign ? 'max-h-[20dvh] shrink-0 overflow-y-auto' : undefined}>
+            <ErrorBanner
+              error={errorState}
+              onDismiss={() => setErrorState(null)}
+              onRetry={lastFailedAction ? () => void lastFailedAction() : undefined}
+            />
+          </div>
         )}
 
         {!campaignsLoaded ? (
@@ -628,10 +647,10 @@ export default function App() {
             const eventAudit = classifyEventsForAudit(activeCampaign, events);
 
             return (
-              <div className="grid grid-cols-1 lg:grid-cols-[310px_minmax(0,1fr)_330px] gap-5 items-start">
+              <div className="flex min-h-0 flex-1 flex-col gap-2 lg:grid lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(230px,310px)_minmax(0,1fr)_minmax(250px,330px)] lg:gap-5">
                 {/* Coluna Esquerda: Personagem & Inventário */}
                 <div
-                  className={`bg-[#121620] border border-[#D4AF37]/15 rounded-xl p-5 ${
+                  className={`min-h-0 overflow-y-auto flex-1 bg-[#121620] border border-[#D4AF37]/15 rounded-xl p-5 ${
                     mobileTab === 'character' ? 'block' : 'hidden lg:block'
                   }`}
                 >
@@ -643,6 +662,7 @@ export default function App() {
                   />
                   <InventoryPanel
                     items={inventory}
+                    readOnly={localFreixo}
                     isArchived={activeCampaign.status === 'archived'}
                     isMutating={isMutating}
                     onMutateInventory={handleInventoryMutation}
@@ -651,16 +671,27 @@ export default function App() {
 
                 {/* Coluna Central: Narrativa & Campo de Ação Livre */}
                 <div
-                  className={`${
-                    mobileTab === 'narrative' ? 'block' : 'hidden lg:block'
-                  } h-full`}
+                  className={'order-last min-h-0 lg:order-none ' + (mobileTab === 'narrative' ? 'flex-1' : 'shrink-0')}
                 >
                   <NarrativeStage
+                    automaticDuration={localFreixo}
                     key={activeCampaign.id}
                     campaign={activeCampaign}
                     entries={narrativeAudit.active}
+                    historyVisible={mobileTab === 'narrative'}
                     isMutating={isMutating}
                     pendingAction={pendingTurn?.declaredAction}
+                    pendingConflict={Boolean(pendingTurn && conflictingTurnId === pendingTurn.turnId)}
+                    onResumePending={pendingTurn ? () => void submitPlayerTurn(pendingTurn) : undefined}
+                    onDiscardPending={pendingTurn ? () => {
+                      clearPendingTurn(window.sessionStorage, user.uid, pendingTurn);
+                      setConflictingTurnId(null);
+                      setErrorState(null);
+                    } : undefined}
+                    clarification={activeClarification && (!pendingTurn || isMutating) ? activeClarification.message : undefined}
+                    gameplayFeedback={gameplayFeedback?.ownerId === user?.uid &&
+                      gameplayFeedback?.campaignId === activeCampaign.id ? gameplayFeedback.message : undefined}
+                    onCancelClarification={() => setClarification(null)}
                     confirmedAction={localFreixo ? eventAudit.active.find((event) =>
                       event.type === 'PLAYER_ACTION' && event.sequence === activeCampaign.lastSequence) : undefined}
                     onSubmitAction={handlePlayerAction}
@@ -669,7 +700,7 @@ export default function App() {
 
                 {/* Coluna Direita: Calendário, Pontos de Controle e Registro de Eventos */}
                 <div
-                  className={`bg-[#121620] border border-[#D4AF37]/15 rounded-xl p-5 ${
+                  className={`min-h-0 overflow-y-auto flex-1 bg-[#121620] border border-[#D4AF37]/15 rounded-xl p-5 ${
                     mobileTab === 'world' ? 'block' : 'hidden lg:block'
                   }`}
                 >

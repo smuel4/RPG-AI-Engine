@@ -4,10 +4,11 @@ import { advanceContinuity, familyKitchen, type createContinuityFixture } from '
 import { reviewEchoArcNarration } from './narrativeReview';
 import { planTurn } from '../src/engine/turnPlanner';
 import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
-import { freixoWoodWorkshop } from '../src/engine/npcIdentity';
+import type { TurnCatalog } from '../src/engine/turnPlanner';
+import { freixoFamilyYard, freixoWoodWorkshop } from '../src/engine/npcIdentity';
 export { villageWell };
 
-export const familyYard = 'Quintal da casa da família, Vila de Freixo';
+export const familyYard = freixoFamilyYard;
 export const familyRoom = 'Quarto de Samuel, casa da família, Vila de Freixo';
 
 const destinations = [
@@ -32,11 +33,20 @@ export const freixoPlayableCatalog = {
     { from: familyYard, to: freixoWoodWorkshop, minutes: 4 },
     { from: freixoWoodWorkshop, to: familyYard, minutes: 4 }],
   objects: [
+    { id: 'demo-armario-cozinha', name: 'armário', aliases: ['armário da cozinha'], location: familyKitchen,
+      description: 'Um pequeno armário fixo na cozinha.',
+      openable: { aberto: 'O armário está aberto.', fechado: 'O armário está fechado.' } },
     { id: 'demo-bancada-cozinha', name: 'bancada', aliases: ['bancada da cozinha'], location: familyKitchen,
       description: 'Há uma bancada de trabalho na cozinha.',
-      condition: { activityId: 'demo-organizar-cozinha', initial: 'A bancada ainda está por organizar.' } },
+      condition: { activityId: 'demo-organizar-cozinha', initial: 'A bancada ainda está por organizar.',
+        organize: { completed: 'A bancada está organizada.' }, knownBy: ['echo-arc:teresa'] } },
     { id: 'demo-bancada-oficina', name: 'bancada de trabalho', aliases: ['bancada da oficina', 'bancada'],
       location: freixoWoodWorkshop, description: 'Há uma bancada de trabalho na oficina de madeira.' },
+    // Initial test fixture for the authoritative pickup and drop flow.
+    { id: 'demo-bloco-madeira', name: 'bloco de madeira', aliases: ['bloco'], location: familyKitchen,
+      description: 'Um pequeno bloco de madeira sem marcas.',
+      // V2 fixture: only Henrique in the workshop is authorized to receive this object.
+      portable: { delivery: { recipientKey: 'echo-arc:henrique', location: freixoWoodWorkshop } } },
   ],
   activities: [{ id: 'demo-organizar-cozinha', location: familyKitchen, participant: 'Teresa',
     verb: 'organizar', target: 'cozinha', minutes: 5, result: 'A bancada da cozinha ficou organizada.' }],
@@ -47,7 +57,7 @@ export const freixoPlayableCatalog = {
     { id: familyRoom, aliases: ['quarto'] },
     { id: freixoWoodWorkshop, aliases: ['oficina', 'oficina de madeira', 'oficina de Henrique'] },
   ],
-};
+} satisfies TurnCatalog;
 
 type FreeState = ReturnType<typeof createContinuityFixture>;
 type Routine = { plan: FreeTurnPlan; fallback: string };

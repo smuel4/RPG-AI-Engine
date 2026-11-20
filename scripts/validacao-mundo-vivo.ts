@@ -10,6 +10,7 @@ import { deleteApp, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { verifyFirebasePlayer } from '../server/firebaseAuth';
+import { freixoEmulatorPorts } from '../server/freixoEmulatorPorts.mjs';
 import { groqNarrator } from '../server/groqNarrator';
 import { buildNarratorContext } from '../server/narratorMemory';
 import { buildNarratorPrompt, narratorInstructions } from '../server/narratorProvider';
@@ -47,8 +48,11 @@ async function run() {
   const interactions = args.length === 1 && args[0] === '--interacoes-http';
   if (args.length && !live && !prepareSite && !interactions) throw new Error('Opção desconhecida.');
   const database = interactions ? 'freixo-interacoes-' + randomUUID() : DATABASE;
-  if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8080' ||
-      process.env.FIREBASE_AUTH_EMULATOR_HOST !== '127.0.0.1:9099' ||
+  const alternate = process.env.FREIXO_TEST_ALT_PORTS === '1';
+  const ports = freixoEmulatorPorts(alternate);
+  if (alternate && !prepareSite) throw new Error('As portas alternativas são exclusivas da preparação para o teste HTTP.');
+  if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:' + ports.firestore ||
+      process.env.FIREBASE_AUTH_EMULATOR_HOST !== '127.0.0.1:' + ports.auth ||
       process.env.FIREBASE_PROJECT_ID !== PROJECT) throw new Error('Exige os dois emuladores em loopback e o projeto demo.');
   if (live && !process.env.GROQ_API_KEY?.trim()) throw new Error('GROQ_API_KEY precisa estar disponível no ambiente do processo.');
 
@@ -99,7 +103,7 @@ async function run() {
     const email = `samuel-${randomUUID()}@example.test`;
     const password = randomUUID();
     const user = await getAuth(app).createUser({ email, password, emailVerified: true });
-    const response = await fetch('http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo', {
+    const response = await fetch(`http://127.0.0.1:${ports.auth}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo`, {
       method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, returnSecureToken: true }),
     });

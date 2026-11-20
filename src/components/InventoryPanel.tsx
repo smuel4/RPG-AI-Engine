@@ -8,6 +8,7 @@ interface InventoryPanelProps {
   items: InventoryItem[];
   isArchived: boolean;
   isMutating: boolean;
+  readOnly?: boolean;
   onMutateInventory: (command: InventoryMutationCommand) => Promise<boolean>;
 }
 
@@ -15,6 +16,7 @@ export function InventoryPanel({
   items,
   isArchived,
   isMutating,
+  readOnly,
   onMutateInventory,
 }: InventoryPanelProps) {
   const [filter, setFilter] = useState<'todos' | InventoryCategory>('todos');
@@ -73,7 +75,7 @@ export function InventoryPanel({
           </span>
         </div>
 
-        <button
+        {!readOnly && <button
           type="button"
           disabled={isArchived || isMutating}
           onClick={() => {
@@ -83,8 +85,10 @@ export function InventoryPanel({
           className="px-3 py-1.5 text-xs font-medium rounded-md border border-[#D4AF37]/30 text-[#F2E2B0] hover:bg-[#D4AF37]/10 disabled:opacity-40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           {showAddForm ? 'Cancelar' : 'Adicionar Item'}
-        </button>
+        </button>}
       </div>
+
+      {readOnly && <p className="text-xs text-[#9CA3AF]">Pegue, largue e entregue objetos pelo campo de ação.</p>}
 
       {/* Filtro funcional por categoria */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1">
@@ -112,7 +116,7 @@ export function InventoryPanel({
         ))}
       </div>
 
-      {showAddForm && (
+      {showAddForm && !readOnly && (
         <form
           onSubmit={handleAddSubmit}
           className="bg-[#0E121A] border border-[#D4AF37]/25 rounded-lg p-3.5 space-y-3"
@@ -243,7 +247,7 @@ export function InventoryPanel({
                 <p className="text-xs text-[#B7B2A6] leading-relaxed">{item.description}</p>
               )}
 
-              <div className="flex items-center justify-between gap-2 pt-0.5">
+              {!readOnly && <div className="flex items-center justify-between gap-2 pt-0.5">
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
@@ -306,7 +310,7 @@ export function InventoryPanel({
                 >
                   <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                 </button>
-              </div>
+              </div>}
             </li>
           ))}
         </ul>

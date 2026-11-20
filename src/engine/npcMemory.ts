@@ -2,7 +2,8 @@ import type { Campaign, NpcRecord, WorldTime } from '../types/game';
 import { getActiveTimelineId } from './rulesEngine';
 
 export type NpcMemoryOrigin =
-  | { kind: 'observed'; subjectId: string; location: string }
+  | { kind: 'observed'; subjectId: string; location: string; event?: 'organization' }
+  | { kind: 'participated'; subjectId: string; event: 'delivery' | 'organization' }
   | { kind: 'reported'; reporterId: string; speakerName?: string }
   | { kind: 'interpretation'; evidenceId: string }
   | { kind: 'consequence'; effect: 'commitment' | 'relationship'; subjectId: string };

@@ -6,6 +6,7 @@ export interface RequestNarratorTurnOptions {
   advanceMinutes?: number;
   mode?: 'gemini' | 'fixed';
   turn?: TurnOrigin;
+  clarificationToken?: string;
 }
 
 export interface NarratorTurnResult {
@@ -20,10 +21,13 @@ export interface NarratorTurnResult {
 export interface NarratorErrorPayload {
   code: string;
   message: string;
+  clarificationToken?: string;
+  gameplayFeedback?: boolean;
 }
 
 export class NarratorRequestError extends Error {
-  constructor(message: string, readonly code?: string, readonly status?: number) {
+  constructor(message: string, readonly code?: string, readonly status?: number,
+    readonly clarificationToken?: string, readonly gameplayFeedback = false) {
     super(message);
   }
 }
@@ -44,6 +48,7 @@ export async function requestNarratorTurn(
       advanceMinutes: options.advanceMinutes ?? 10,
       mode: options.mode,
       ...options.turn,
+      clarificationToken: options.clarificationToken,
     }),
   });
 
@@ -59,7 +64,10 @@ export async function requestNarratorTurn(
       errorPayload?.message ||
       `Falha na chamada ao narrador (${response.status}: ${response.statusText})`;
 
-    throw new NarratorRequestError(message, errorPayload?.code, response.status);
+    const clarificationToken = typeof errorPayload?.clarificationToken === 'string'
+      ? errorPayload.clarificationToken : undefined;
+    throw new NarratorRequestError(message, errorPayload?.code, response.status, clarificationToken,
+      response.status === 422 && errorPayload?.gameplayFeedback === true);
   }
 
   return (await response.json()) as NarratorTurnResult;

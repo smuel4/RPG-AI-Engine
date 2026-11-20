@@ -11,6 +11,9 @@ import { evaluatePilotTurn, readTurnPlanPilot } from './server/turnPlanPilot';
 import { getApps, initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { persistPilotTurn, PilotTurnError, SERVER_PILOT_ID } from './server/persistPilotTurn';
+import { clarificationReceiptBinding, issuePilotClarification, readClarificationParts, readPilotClarification } from './server/pilotClarification';
+import { describePilotFeedback } from './server/pilotFeedback';
+import { freixoEmulatorPorts } from './server/freixoEmulatorPorts.mjs';
 import { describeNarratorFailure } from './server/narratorProvider';
 import { generateCampaignNarration, selectNarratorMode, tryAcquireNarratorTurn } from './server/narratorService';
 import { FixedMilestoneNarrator } from './src/engine/narratorPort';
@@ -22,9 +25,12 @@ const turnPlanPilot = localFreixo ? { campaignId: SERVER_PILOT_ID,
   catalog: (await import('./scripts/echoArcFreeTurn')).freixoPlayableCatalog }
   : readTurnPlanPilot(process.env.TURN_PLAN_PILOT_CATALOG, process.env.TURN_PLAN_PILOT_CAMPAIGN ?? '');
 const serverPilotEnabled = process.env.TURN_PLAN_SERVER_COMMIT === 'true';
+const alternateTest = localFreixo && process.env.FREIXO_TEST_ALT_PORTS === '1';
+const emulatorPorts = freixoEmulatorPorts(alternateTest);
 if (localFreixo && (!serverPilotEnabled || process.env.NODE_ENV === 'production' ||
-    process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8080' ||
-    process.env.FIREBASE_AUTH_EMULATOR_HOST !== '127.0.0.1:9099' ||
+    process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:' + emulatorPorts.firestore ||
+    process.env.FIREBASE_AUTH_EMULATOR_HOST !== '127.0.0.1:' + emulatorPorts.auth ||
+    (alternateTest && (process.env.PORT !== String(emulatorPorts.http) || process.env.NARRATOR_MODE !== 'fixed')) ||
     !['fixed', 'groq'].includes(process.env.NARRATOR_MODE ?? 'fixed'))) {
   throw new Error('Freixo local exige modo de desenvolvimento, piloto e ambos os emuladores em loopback.');
 }
@@ -151,6 +157,20 @@ async function startServer() {
           initializeApp({ projectId: 'demo-rpg-ai-engine' }, 'echo-arc-pilot-store');
         try {
           const db = getFirestore(app, process.env.FIRESTORE_DATABASE_ID!);
+          let objectAnswer: string | undefined;
+          let clarification: { binding: string; replayOnly: boolean } | undefined;
+          const clarificationToken: unknown = req.body?.clarificationToken;
+          if (clarificationToken !== undefined) {
+            const parts = readClarificationParts(clarificationToken);
+            if (!parts) throw new PilotTurnError('PILOT_CLARIFICATION_EXPIRED');
+            const prefix = readPilotClarification(playerId, turn, parts.token);
+            objectAnswer = trimmedAction.replace(/[.!?]$/u, '').trim();
+            if (!/^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} '’-]{0,159}$/u.test(objectAnswer)) {
+              throw new PilotTurnError(prefix ? 'PILOT_OBJECT_UNREGISTERED' : 'PILOT_CLARIFICATION_EXPIRED');
+            }
+            turn = { ...turn, declaredAction: (prefix ?? parts.prefix) + ' ' + objectAnswer };
+            clarification = { binding: clarificationReceiptBinding(playerId, turn, parts.token), replayOnly: prefix === undefined };
+          }
           const result = await persistPilotTurn(db,
             turnPlanPilot.catalog, playerId, turn, async (campaign, sceneIntent, present, npcRelationships, narrative, declaredAction) => {
               const mode = process.env.NARRATOR_MODE;
@@ -170,7 +190,7 @@ async function startServer() {
               return generateCampaignNarration({ campaign, sceneIntent, declaredAction,
                 narrative, inventory: [], npcs: present.npcs, sceneKnowledge: present.knowledge,
                 npcActivities: present.activities, npcMemories: present.memories, npcRelationships }, mode);
-            });
+            }, objectAnswer, clarification);
           res.json({ ...result, turnId: turn.turnId, expectedRevision: turn.expectedRevision, baseTimelineId: turn.baseTimelineId });
         } catch (error) {
           const code = error instanceof PilotTurnError ? error.code : 'PILOT_TURN_FAILED';
@@ -180,22 +200,17 @@ async function startServer() {
           const status = code === 'CAMPAIGN_ACCESS_DENIED' ? 403
             : ['TURN_ID_CONFLICT', 'CONCURRENT_STATE_CONFLICT'].includes(code) ? 409 : 422;
           const messages: Record<string, string> = {
-            PILOT_SPEECH_UNAVAILABLE: 'Indique um único NPC presente para conversar.',
-            PILOT_TRAVEL_UNAVAILABLE: 'Indique um único destino conhecido com rota disponível a partir daqui.',
-            PILOT_ACTION_UNSUPPORTED: 'Descreva um deslocamento, uma conversa, uma observação ou uma ajuda disponível.',
-            PILOT_OBSERVATION_UNAVAILABLE: 'Indique o ambiente atual ou uma pessoa presente que você possa observar.',
-            PILOT_OBJECT_AMBIGUOUS: 'Qual objeto você quer examinar? Indique o nome dele.',
-            PILOT_OBJECT_OUT_OF_REACH: 'Esse objeto está em outro local. Vá até lá antes de examiná-lo.',
-            PILOT_OBJECT_UNREGISTERED: 'Esse detalhe não está registrado como objeto examinável aqui.',
-            PILOT_ACTIVITY_UNAVAILABLE: 'Essa ajuda não está disponível aqui ou já foi concluída.',
-            PILOT_ACTION_INVALID: 'Essa ação não pôde ser aplicada. Tente descrevê-la de outra forma.',
-            PILOT_SEQUENCE_LIMIT: 'Envie até duas ações por turno.',
-            PILOT_SEQUENCE_NEEDS_REPLY: 'Envie a interação separadamente e aguarde a resposta ou esclareça a condição antes de continuar.',
+            PILOT_CLARIFICATION_EXPIRED: 'A pergunta expirou. Confira o histórico e envie uma nova ação.',
             PILOT_NARRATION_CONFLICT: 'A resposta do narrador entrou em conflito com o estado da cena. A ação não foi registrada.',
           };
           const step = error instanceof PilotTurnError ? error.step : undefined;
           const message = messages[code] ?? 'O servidor não confirmou o turno piloto (' + code + ').';
-          res.status(status).json({ code, message: step ? 'Etapa ' + step + '. ' + message : message });
+          const prefix = error instanceof PilotTurnError ? error.clarificationPrefix : undefined;
+          const clarificationToken = prefix && req.body?.clarificationToken === undefined
+            ? issuePilotClarification(playerId, turn, prefix) : undefined;
+          const feedback = error instanceof PilotTurnError ? describePilotFeedback(error, Boolean(clarificationToken)) : undefined;
+          res.status(status).json({ code, message: feedback ?? (step ? 'Etapa ' + step + '. ' + message : message),
+            gameplayFeedback: feedback ? true : undefined, clarificationToken });
         }
         return;
       }
@@ -357,14 +372,14 @@ async function startServer() {
     }
   });
 
-  if (!IS_PROD) {
+  if (!IS_PROD && !alternateTest) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (IS_PROD) {
     const distPath = path.resolve(__dirname, 'dist');
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));

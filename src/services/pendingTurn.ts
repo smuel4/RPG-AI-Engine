@@ -2,12 +2,25 @@ import { isTurnId, type TurnIdentity } from '../engine/turnIdentity';
 import { NarratorRequestError } from './narratorClient';
 
 const pilotRejections = new Set([
+  'PILOT_FACTUAL_NPC_OCCUPIED',
   'PILOT_TRAVEL_UNAVAILABLE', 'PILOT_SPEECH_UNAVAILABLE', 'PILOT_ACTION_UNSUPPORTED',
   'PILOT_OBSERVATION_UNAVAILABLE', 'PILOT_ACTIVITY_UNAVAILABLE', 'PILOT_ACTION_INVALID',
   'PILOT_OBJECT_AMBIGUOUS', 'PILOT_OBJECT_OUT_OF_REACH', 'PILOT_OBJECT_UNREGISTERED',
+  'PILOT_OBJECT_FIXED', 'PILOT_OBJECT_NOT_HELD', 'PILOT_OBJECT_ALREADY_HELD',
+  'PILOT_OBJECT_OWNED', 'PILOT_TRANSFER_SEQUENCE', 'PILOT_TRANSFER_AMBIGUOUS',
+  'PILOT_DELIVERY_RECIPIENT', 'PILOT_DELIVERY_NOT_TRANSFERABLE', 'PILOT_DELIVERY_NOT_ALLOWED', 'PILOT_DELIVERY_OFFER',
+  'PILOT_ENVIRONMENT_SEQUENCE', 'PILOT_ENVIRONMENT_AMBIGUOUS', 'PILOT_ENVIRONMENT_UNAVAILABLE',
+  'PILOT_ENVIRONMENT_ALREADY_ORGANIZED',
+  'PILOT_WAIT_SEQUENCE', 'PILOT_WAIT_UNAVAILABLE',
+  'PILOT_OPEN_CLOSE_SEQUENCE', 'PILOT_OPEN_CLOSE_AMBIGUOUS', 'PILOT_OPEN_CLOSE_UNAVAILABLE', 'PILOT_OPEN_CLOSE_ALREADY_SET',
   'PILOT_NARRATION_CONFLICT',
   'PILOT_SEQUENCE_LIMIT', 'PILOT_SEQUENCE_NEEDS_REPLY',
+  'PILOT_CLARIFICATION_EXPIRED',
 ]);
+
+export interface PendingTurn extends TurnIdentity {
+  clarificationToken?: string;
+}
 
 export function releaseRejectedPilotTurn(storage: Storage, ownerId: string, turn: TurnIdentity,
   error: unknown): error is NarratorRequestError {
@@ -20,7 +33,7 @@ export function releaseRejectedPilotTurn(storage: Storage, ownerId: string, turn
 const keyFor = (ownerId: string, campaignId: string) =>
   'echo-arc:pending-turn:' + JSON.stringify([ownerId, campaignId]);
 
-export function loadPendingTurn(storage: Storage, ownerId: string, campaignId: string): TurnIdentity | null {
+export function loadPendingTurn(storage: Storage, ownerId: string, campaignId: string): PendingTurn | null {
   try {
     const record = JSON.parse(storage.getItem(keyFor(ownerId, campaignId)) ?? 'null');
     if (!record || record.ownerId !== ownerId || record.campaignId !== campaignId ||
@@ -30,16 +43,19 @@ export function loadPendingTurn(storage: Storage, ownerId: string, campaignId: s
         !Number.isSafeInteger(record.expectedRevision) || record.expectedRevision < 0 ||
         typeof record.baseTimelineId !== 'string' || !/^[\w-]{1,128}$/.test(record.baseTimelineId)) return null;
     const { turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId } = record;
-    return { campaignId, turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId };
+    if (record.clarificationToken !== undefined &&
+        (typeof record.clarificationToken !== 'string' || record.clarificationToken.length > 556)) return null;
+    return { campaignId, turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId,
+      ...(record.clarificationToken ? { clarificationToken: record.clarificationToken } : {}) };
   } catch {
     return null;
   }
 }
 
-export function savePendingTurn(storage: Storage, ownerId: string, turn: TurnIdentity): void {
-  const { campaignId, turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId } = turn;
+export function savePendingTurn(storage: Storage, ownerId: string, turn: PendingTurn): void {
+  const { campaignId, turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId, clarificationToken } = turn;
   storage.setItem(keyFor(ownerId, campaignId), JSON.stringify({
-    ownerId, campaignId, turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId,
+    ownerId, campaignId, turnId, declaredAction, advanceMinutes, expectedRevision, baseTimelineId, clarificationToken,
   }));
 }
 

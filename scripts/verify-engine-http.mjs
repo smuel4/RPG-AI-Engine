@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdtemp } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freixoEmulatorPorts } from '../server/freixoEmulatorPorts.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const testArgs = ['--import', 'tsx', '--test', '--test-reporter=spec', 'tests/freixoObjectsHttpOfficial.test.ts'];
@@ -28,16 +29,28 @@ try {
   if (process.argv[2] === '--run-test') {
     process.exitCode = run(testArgs, root, process.env);
   } else {
-    for (const port of [8080, 9099, 3219]) await checkPort(port);
+    const alternate = process.argv.includes('--alternate');
+    const ports = freixoEmulatorPorts(alternate);
+    for (const port of Object.values(ports)) await checkPort(port);
     const directory = await mkdtemp(join(tmpdir(), 'echo-arc-engine-http-'));
     console.log(`Logs dos emuladores: ${directory}`);
-    for (const file of ['firebase.json', 'firestore.rules']) {
-      await copyFile(join(root, file), join(directory, file));
+    const config = JSON.parse(await readFile(join(root, 'firebase.json'), 'utf8'));
+    config.emulators.firestore.port = ports.firestore;
+    config.emulators.auth.port = ports.auth;
+    if (alternate) {
+      config.emulators.hub = { host: '127.0.0.1', port: ports.hub };
+      config.emulators.logging = { host: '127.0.0.1', port: ports.logging };
+      config.emulators.ui = { enabled: false };
+      config.emulators.firestore.websocketPort = ports.websocket;
     }
+    await writeFile(join(directory, 'firebase.json'), JSON.stringify(config));
+    await copyFile(join(root, 'firestore.rules'), join(directory, 'firestore.rules'));
 
     // Firebase Tools inclui o ambiente do processo filho no log de depuração.
     const allowed = /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|OS|TEMP|TMP|TMPDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|JAVA_HOME)$/i;
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.test(key)));
+    Object.assign(env, { TEMP: directory, TMP: directory, TMPDIR: directory });
+    if (alternate) env.FREIXO_TEST_ALT_PORTS = '1';
     const firebase = join(root, 'node_modules', 'firebase-tools', 'lib', 'bin', 'firebase.js');
     const command = `node "${fileURLToPath(import.meta.url)}" --run-test`;
     process.exitCode = run([firebase, 'emulators:exec', '--only', 'auth,firestore',
