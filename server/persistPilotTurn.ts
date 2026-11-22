@@ -20,6 +20,11 @@ const travelIntent = /^(?:eu\s+)?(?:vou|caminho|sigo|quero\s+ir)\b/iu;
 const transferIntent = /^(?:eu\s+)?(?:(pego|recolho|largo|deixo)|(?:quero|vou)\s+(pegar|recolher|largar|deixar))\s+(.+?)[.!?]?$/iu;
 const deliveryIntent = /^(?:eu\s+)?(entrego|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|ofereço)\s+(.+?)\s+(?:para|ao|à|a)\s+(.+?)[.!]?$/iu;
 const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+function storageIntent(action: string) {
+  const store = /^(?:eu )?(?:guardo|coloco|(?:tento|quero|vou) (?:guardar|colocar)) (.+?) (?:dentro do|no) (.+?)[.!]?$/iu.exec(action);
+  const match = store ?? /^(?:eu )?(?:retiro|tiro|pego|(?:tento|quero|vou) (?:retirar|tirar|pegar)) (.+?) (?:de dentro do|do) (.+?)[.!]?$/iu.exec(action);
+  return match && { kind: store ? 'store' as const : 'retrieve' as const, item: match[1], container: match[2] };
+}
 const dialogueSyntax = (text: string) => text.normalize('NFKC')
   .replace(/[\u200B\uFEFF]/gu, '').replace(/\s+/gu, ' ').trim();
 
@@ -159,7 +164,7 @@ function splitPilotActions(action: string): string[] {
   while (true) {
     // Preserve the literal contents of a colon-delimited utterance.
     const separator = directedSpeech.test(dialogueSyntax(remaining)) ? null
-      : /\s*;\s*|\s*,?\s+\b(?:e\s+depois|depois|em seguida)\s+|\s+e\s+(?=(?:eu\s+)?(?:vou|caminho|sigo|olho|observo|examino|inspeciono|organizo|arrumo|abro|fecho|espero|aguardo|fico\s+aqui\s+esperando|ajudo|quero|pergunto|digo|falo|conto|confidencio|cumprimento|pego|recolho|largo|deixo|entrego|ofereço|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|se)\b)/iu.exec(remaining);
+      : /\s*;\s*|\s*,?\s+\b(?:e\s+depois|depois|em seguida)\s+|\s+e\s+(?=(?:eu\s+)?(?:vou|caminho|sigo|olho|observo|examino|inspeciono|organizo|arrumo|abro|fecho|espero|aguardo|fico\s+aqui\s+esperando|ajudo|quero|pergunto|digo|falo|conto|confidencio|cumprimento|guardo|coloco|retiro|tiro|tento|pego|recolho|largo|deixo|entrego|ofereço|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|se)\b)/iu.exec(remaining);
     if (!separator) return [...steps, remaining.trim()];
     steps.push(remaining.slice(0, separator.index).trim().replace(/,$/u, ''));
     if (steps.length === 2) throw new PilotTurnError('PILOT_SEQUENCE_LIMIT', undefined, 3);
@@ -219,17 +224,21 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
       const [item, placement] = await tx.getAll(inventory, ground);
       const held = item.data();
       const placed = placement.data();
-      const placedOnGround = typeof placed?.location === 'string' && placed.npcId === undefined &&
+      const placedOnGround = typeof placed?.location === 'string' && placed.npcId === undefined && placed.containerId === undefined &&
         catalog.places.some(({ id }) => id === placed.location);
-      const placedWithNpc = typeof placed?.npcId === 'string' && placed.npcId.length > 0 && placed.location === undefined;
+      const placedWithNpc = typeof placed?.npcId === 'string' && placed.npcId.length > 0 && placed.location === undefined &&
+        placed.containerId === undefined;
+      const stored = typeof placed?.containerId === 'string' && placed.containerId === object.portable?.storageId &&
+        placed.npcId === undefined && placed.location === undefined;
       if ((item.exists && (!held || held.id !== object.id || held.ownerId !== ownerId ||
           held.campaignId !== campaign.id || held.quantity !== 1 || placement.exists)) ||
           (placement.exists && (!placed || placed.ownerId !== ownerId || placed.campaignId !== campaign.id ||
-            placed.timelineId !== turn.baseTimelineId || (!placedOnGround && !placedWithNpc)))) {
+            placed.timelineId !== turn.baseTimelineId || (!placedOnGround && !placedWithNpc && !stored)))) {
         throw new PilotTurnError('PILOT_TURN_FAILED', 'portable-state-conflict');
       }
       return { id: object.id, npcId: placedWithNpc ? placed.npcId as string : undefined,
-        location: item.exists ? null : placedWithNpc ? undefined : (placed?.location as string | undefined) ?? object.location };
+        containerId: stored ? placed.containerId as string : undefined,
+        location: item.exists ? null : placedWithNpc || stored ? undefined : (placed?.location as string | undefined) ?? object.location };
     }));
     const routineRef = campaignRef.collection('npcRoutineState').doc(getActiveTimelineId(campaign));
     const runtime = (await tx.get(routineRef)).data() as NpcRoutineState | undefined;
@@ -268,23 +277,25 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const help = /^(?:eu\s+)?(?:ajudo|(?:quero|vou|tento)\s+ajudar)\s+(.+?)\s+a\s+(\p{L}+)\s+(.+?)[.!]?$/iu.exec(commandSyntax);
     const explicitSpeech = directedSpeech.exec(action) ?? directedSpeech.exec(syntax);
     const here = records.filter((npc) => npc.location === campaign.currentLocation);
+    const storage = storageIntent(commandSyntax);
     const transferCommand = transferIntent.exec(commandSyntax);
     const delivery = deliveryIntent.exec(commandSyntax);
     const organize = /^(?:eu\s+)?(?:organizo|arrumo|vou\s+(?:organizar|arrumar))\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
     const opening = /^(?:eu\s+)?(abro|fecho)\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
     if (opening && actions.length > 1) throw new PilotTurnError('PILOT_OPEN_CLOSE_SEQUENCE');
     if (organize && actions.length > 1) throw new PilotTurnError('PILOT_ENVIRONMENT_SEQUENCE');
-    if ((transferCommand || delivery) && actions.length > 1) throw new PilotTurnError('PILOT_TRANSFER_SEQUENCE');
+    const transferring = transferCommand || delivery || storage;
+    if (transferring && actions.length > 1) throw new PilotTurnError('PILOT_TRANSFER_SEQUENCE');
     const localObjects = catalogObjects.filter((object) => objectLocation(object) === campaign.currentLocation);
     const bareObservation = /^(?:eu\s+)?(?:examino|observo|olho|inspeciono)[.!?]?$/iu.exec(commandSyntax);
     if (bareObservation && actions.length === 1 && localObjects.length) {
       throw new PilotTurnError('PILOT_OBJECT_AMBIGUOUS', undefined, undefined, undefined, syntax.replace(/[.!?]$/, ''));
     }
-    const natural = explicitSpeech || observation || help || transferCommand || delivery || organize || waiting || opening
+    const natural = explicitSpeech || observation || help || transferring || organize || waiting || opening
       ? null : naturalSpeech(syntax, here, records, context);
     if (!explicitSpeech && !natural && speechIntent.test(syntax)) throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE');
     const speech = Boolean(explicitSpeech || natural);
-    if (!speech && !observation && !help && !transferCommand && !delivery && !organize && !waiting && !opening && (!travelIntent.test(syntax) ||
+    if (!speech && !observation && !help && !transferring && !organize && !waiting && !opening && (!travelIntent.test(syntax) ||
         /^(?:eu\s+)?vou\s+(?:observar|olhar|examinar|inspecionar|ajudar|mexer|pegar|interagir)\b/iu.test(action))) {
       throw new PilotTurnError('PILOT_ACTION_UNSUPPORTED');
     }
@@ -349,22 +360,40 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
           outcome: { location: campaign.currentLocation, elapsedMinutes: activity.minutes },
         };
       }
-      if (transferCommand || delivery) {
+      if (transferring) {
         if (delivery && (normalize(delivery[1]) === 'ofereco' || syntax.endsWith('?'))) {
           throw new PilotTurnError('PILOT_DELIVERY_OFFER');
         }
-        const pickup = /^(?:peg|recolh)/iu.test(transferCommand?.[1] ?? transferCommand?.[2] ?? '');
-        const targetText = delivery?.[2] ?? transferCommand?.[3] ?? '';
-        const key = targetKey(delivery || pickup ? targetText : targetText.replace(/\s+no ch(?:ã|a)o$/iu, ''));
+        const pickup = !storage && /^(?:peg|recolh)/iu.test(transferCommand?.[1] ?? transferCommand?.[2] ?? '');
+        const targetText = storage?.item ?? delivery?.[2] ?? transferCommand?.[3] ?? '';
+        const key = targetKey(storage || delivery || pickup ? targetText : targetText.replace(/\s+no ch(?:ã|a)o$/iu, ''));
         const contextual = /^(?:(?:este|esse|aquele)\s+)?(?:objeto|item)$/u.test(key);
         const matches = catalogObjects.filter(({ id, name, aliases }) => contextual
           ? id === target('object') : [name, ...aliases].some((alias) => targetKey(alias) === key));
-        const eligible = matches.filter((object) => objectLocation(object) === (pickup ? campaign.currentLocation : null));
+        const containers = storage ? catalogObjects.filter(({ name, aliases }) =>
+          [name, ...aliases].some((alias) => targetKey(alias) === targetKey(storage.container))) : [];
+        const container = containers[0];
+        if (storage) {
+          if (!container) throw new PilotTurnError('PILOT_OBJECT_UNREGISTERED');
+          if (containers.length > 1) throw new PilotTurnError('PILOT_TRANSFER_AMBIGUOUS');
+          if (container.location !== campaign.currentLocation) throw new PilotTurnError('PILOT_STORAGE_DISTANT');
+        }
+        const eligible = matches.filter((object) => storage?.kind === 'retrieve'
+          ? portableState.some((entry) => entry.id === object.id && entry.containerId === container.id)
+          : objectLocation(object) === (pickup ? campaign.currentLocation : null));
         if (eligible.length > 1 || (!eligible.length && matches.length > 1)) throw new PilotTurnError('PILOT_TRANSFER_AMBIGUOUS');
         const object = eligible[0] ?? matches[0];
         if (!object) throw new PilotTurnError('PILOT_OBJECT_UNREGISTERED');
+        if (storage) {
+          if (object.portable?.storageId !== container.id || !container.openable) throw new PilotTurnError('PILOT_STORAGE_UNAVAILABLE');
+          if (!runtime?.openObjects?.includes(container.id)) throw new PilotTurnError('PILOT_STORAGE_CLOSED');
+          if (storage.kind === 'retrieve' && !eligible.length) throw new PilotTurnError('PILOT_STORAGE_EMPTY');
+        }
         if (!object.portable) throw new PilotTurnError(delivery ? 'PILOT_DELIVERY_NOT_TRANSFERABLE'
           : pickup ? 'PILOT_OBJECT_FIXED' : 'PILOT_OBJECT_NOT_HELD');
+        if (pickup && portableState.some((entry) => entry.id === object.id && entry.containerId)) {
+          throw new PilotTurnError('PILOT_STORAGE_EXPLICIT');
+        }
         if (pickup && (object.portable.ownerNpcId || objectLocation(object) === undefined)) {
           throw new PilotTurnError('PILOT_OBJECT_OWNED');
         }
@@ -391,7 +420,8 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
             throw new PilotTurnError('PILOT_DELIVERY_NOT_ALLOWED');
           }
         }
-        const transfer = recipient ? { kind: 'delivery' as const, objectId: object.id, recipientId: recipient.id }
+        const transfer = storage ? { kind: storage.kind, objectId: object.id, containerId: container.id, containerName: container.name }
+          : recipient ? { kind: 'delivery' as const, objectId: object.id, recipientId: recipient.id }
           : { kind: pickup ? 'pickup' as const : 'drop' as const, objectId: object.id };
         // A simple transfer follows the pilot's zero-minute policy for local interactions.
         return { transfer, plan: transfer, focus: { kind: 'object', id: object.id } satisfies PilotFocus,
@@ -614,6 +644,8 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
   const transferred = last.transfer && portableRefs.find(({ object }) => object.id === last.transfer?.objectId);
   const transferSummary = transferred && (last.transfer?.kind === 'delivery'
     ? 'Samuel entregou o item “' + transferred.object.name + '” a ' + last.deliveryRecipient + '.'
+    : last.transfer?.kind === 'store' ? `Samuel guardou o item “${transferred.object.name}” no ${last.transfer.containerName}.`
+    : last.transfer?.kind === 'retrieve' ? `Samuel retirou o item “${transferred.object.name}” do ${last.transfer.containerName}.`
     : (last.transfer?.kind === 'pickup' ? 'Samuel recolheu o item “' : 'Samuel deixou no chão o item “') + transferred.object.name + '”.');
   const narrateStep = async (step: typeof last, declared: string) => {
     if ('kind' in step.plan && step.plan.kind === 'speech' && step.plan.factualAnswer) return step.plan.factualAnswer;
@@ -698,7 +730,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
       (transferSummary ? transferSummary + ' ' : '') + (last.organization ? last.organization.result + ' ' : '') +
       (last.openClose ? last.openClose.result + ' ' : '') +
       `${steps.map(({ activity }) => activity?.result).filter(Boolean).map((result) => result + ' ').join('')}${outcome.location} (+${outcome.elapsedMinutes} min)`, createdAt: stamp });
-    if (transferred && last.transfer?.kind === 'pickup') {
+    if (transferred && (last.transfer?.kind === 'pickup' || last.transfer?.kind === 'retrieve')) {
       const item: InventoryItem = { id: transferred.object.id, ownerId, campaignId: campaign.id,
         name: transferred.object.name, category: 'recurso', quantity: 1, description: transferred.object.description,
         equipable: false, equipped: false, createdAt: stamp, updatedAt: stamp };
@@ -707,7 +739,8 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     } else if (transferred) {
       tx.delete(transferred.inventory);
       tx.create(transferred.ground, { ownerId, campaignId: campaign.id, timelineId: turn.baseTimelineId,
-        ...(last.transfer?.kind === 'delivery' ? { npcId: last.transfer.recipientId } : { location: outcome.location }) });
+        ...(last.transfer?.kind === 'delivery' ? { npcId: last.transfer.recipientId }
+          : last.transfer?.kind === 'store' ? { containerId: last.transfer.containerId } : { location: outcome.location }) });
     }
     for (const [index, npc] of last.nextRecords.entries()) {
       if (npc.location !== records[index].location) {

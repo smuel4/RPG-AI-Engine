@@ -51,14 +51,17 @@ export function advanceNpcRoutines(campaign: Campaign, end: WorldTime, records: 
       const route = catalog.routes.find(({ from, to }) => from === location && to === routine.location);
       if (location !== routine.location && (!route || route.blocked || !Number.isSafeInteger(route.minutes) ||
           route.minutes < 1 || earliest + route.minutes > deadline)) return [];
+      const completedAt = earliest + (location === routine.location ? 0 : route!.minutes);
       const change = { npcId: npc.id, from: location, to: routine.location, activity: routine.activity, day: today,
-        completedAt: earliest + (location === routine.location ? 0 : route!.minutes), ...(stage ? { stage } : {}) };
+        completedAt, withinWindow: completedAt < windowEnd, ...(stage ? { stage } : {}) };
       location = routine.location;
       return [change];
     });
   });
   if (isWait || changes.some(({ stage }) => stage)) changes.sort((a, b) => a.completedAt - b.completedAt);
-  const moves = changes.filter(({ from, to }) => from !== to).map(({ completedAt: _, stage: _stage, ...move }) => move);
+  const moves = changes.filter(({ from, to }) => from !== to)
+    .map(({ completedAt: _, stage: _stage, withinWindow: _withinWindow, ...move }) => move);
+  const performed = changes.filter(({ withinWindow }) => withinWindow);
   const observations = moves.flatMap((move) => {
     const subject = records.find(({ id }) => id === move.npcId)!;
     return records.filter((npc) => npc.location === move.from && npc.id !== move.npcId &&
@@ -69,9 +72,9 @@ export function advanceNpcRoutines(campaign: Campaign, end: WorldTime, records: 
     moves,
     state: changes.length === 0 ? saved : {
       ...saved,
-      activities: [...saved.activities.filter((entry) => !changes.some((change) => change.npcId === entry.npcId &&
+      activities: [...saved.activities.filter((entry) => !performed.some((change) => change.npcId === entry.npcId &&
         (change.day !== entry.day || change.stage === entry.stage))),
-        ...changes.map(({ npcId, to, activity, day, stage }) => ({ npcId, location: to, day, activity, ...(stage ? { stage } : {}) }))],
+        ...performed.map(({ npcId, to, activity, day, stage }) => ({ npcId, location: to, day, activity, ...(stage ? { stage } : {}) }))],
       // Preserve observations already saved by the previous pilot.
       observations: saved.observations,
       ...(event ? { memories: recordNpcMemories(saved.memories ?? [], observations.map(({ npcId, subjectId, location, fact }) => ({

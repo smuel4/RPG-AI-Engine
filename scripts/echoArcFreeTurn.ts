@@ -46,7 +46,7 @@ export const freixoPlayableCatalog = {
     { id: 'demo-bloco-madeira', name: 'bloco de madeira', aliases: ['bloco'], location: familyKitchen,
       description: 'Um pequeno bloco de madeira sem marcas.',
       // V2 fixture: only Henrique in the workshop is authorized to receive this object.
-      portable: { delivery: { recipientKey: 'echo-arc:henrique', location: freixoWoodWorkshop } } },
+      portable: { storageId: 'demo-armario-cozinha', delivery: { recipientKey: 'echo-arc:henrique', location: freixoWoodWorkshop } } },
   ],
   activities: [{ id: 'demo-organizar-cozinha', location: familyKitchen, participant: 'Teresa',
     verb: 'organizar', target: 'cozinha', minutes: 5, result: 'A bancada da cozinha ficou organizada.' }],

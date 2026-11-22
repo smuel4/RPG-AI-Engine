@@ -1,3 +1,4 @@
+import { isolatedFirestore } from '../scripts/isolated-firestore.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp, deleteApp } from 'firebase/app';
@@ -6,6 +7,8 @@ import {
   setDoc, getDoc, runTransaction, serverTimestamp, terminate
 } from 'firebase/firestore';
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
+
+const isolatedPort = await isolatedFirestore();
 
 test('Restauracao: atualizar somente campanha', async () => {
   const app = initializeApp({
@@ -19,7 +22,7 @@ test('Restauracao: atualizar somente campanha', async () => {
     'ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704'
   );
 
-  connectFirestoreEmulator(db, '127.0.0.1', 8080, {
+  connectFirestoreEmulator(db, '127.0.0.1', isolatedPort, {
     mockUserToken: {
       user_id: 'dono_restore_update',
       email: 'local@example.com',

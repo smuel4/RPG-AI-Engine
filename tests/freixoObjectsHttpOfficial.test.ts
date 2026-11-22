@@ -317,6 +317,39 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     assert.equal((await taken.send()).narration, taken.result.narration);
     await assert.rejects(submit('Pego o bloco.'), { code: 'PILOT_OBJECT_ALREADY_HELD' });
     assert.deepEqual(await snapshot(), afterPickup);
+    const storeBlock = 'Tento guardar o bloco de madeira dentro do armário.';
+    await assert.rejects(submit(storeBlock), { code: 'PILOT_STORAGE_CLOSED', message: /armário está fechado/ });
+    assert.deepEqual(await snapshot(), afterPickup);
+    await submit('Abro o armário.');
+    const baseStorage = await state();
+    const storeAtRevision = (turnId: string) => requestNarratorTurn(owner.idToken, {
+      campaignId: ref.id, declaredAction: storeBlock, advanceMinutes: 10,
+      turn: { turnId, expectedRevision: baseStorage.revision, baseTimelineId: baseStorage.activeTimelineId ?? 'tl_root' },
+    });
+    const requests = [crypto.randomUUID(), crypto.randomUUID()];
+    const race = await Promise.allSettled(requests.map(storeAtRevision));
+    assert.equal(race.filter((entry) => entry.status === 'fulfilled').length, 1);
+    const winner = requests[race.findIndex((entry) => entry.status === 'fulfilled')];
+    for (const entry of race) {
+      if (entry.status === 'fulfilled') assert.match(entry.value.narration, /guardou.*bloco de madeira.*armário/);
+      else assert.ok(['CONCURRENT_STATE_CONFLICT', 'ACTION_IN_PROGRESS'].includes(entry.reason.code));
+    }
+    assert.equal((await item.get()).exists, false);
+    assert.deepEqual((await ground.get()).data(), { ownerId: seed.ownerId, campaignId: ref.id,
+      timelineId: baseStorage.activeTimelineId ?? 'tl_root', containerId: 'demo-armario-cozinha' });
+    const afterStorage = await snapshot();
+    assert.match((await storeAtRevision(winner)).narration, /guardou/);
+    await assert.rejects(storeAtRevision(crypto.randomUUID()), { code: 'CONCURRENT_STATE_CONFLICT' });
+    await assert.rejects(submit('Coloco o bloco no armário.'), { code: 'PILOT_OBJECT_NOT_HELD' });
+    assert.deepEqual(await snapshot(), afterStorage);
+    await submit('Fecho o armário.');
+    await assert.rejects(submit('Tiro o bloco do armário.'), { code: 'PILOT_STORAGE_CLOSED' });
+    await submit('Abro o armário.');
+    const retrieved = await submit('Retiro o bloco do armário da cozinha.');
+    assert.match(retrieved.result.narration, /retirou.*bloco de madeira.*armário/);
+    assert.equal((await ground.get()).exists, false);
+    assert.equal((await item.get()).data()?.quantity, 1);
+    await submit('Fecho o armário.');
     await submit('Vou ao quintal.');
     assert.equal((await item.get()).exists, true);
     await submit('Largo o bloco.');

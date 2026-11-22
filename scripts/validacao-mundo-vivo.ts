@@ -22,6 +22,8 @@ import { getActiveTimelineId } from '../src/engine/rulesEngine';
 import type { Campaign } from '../src/types/game';
 import { familyKitchen } from './echoArcContinuityFixture';
 import { freixoPlayableCatalog } from './echoArcFreeTurn';
+import { isolatedFirestore } from './isolated-firestore.mjs';
+import { collectPlaytest } from './actionPlaytest';
 
 const PROJECT = 'demo-rpg-ai-engine';
 const DATABASE = 'ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704';
@@ -46,11 +48,13 @@ async function run() {
   const actions = live ? liveActions : dialogueAcceptance;
   const prepareSite = args.length === 1 && args[0] === '--preparar-site';
   const interactions = args.length === 1 && args[0] === '--interacoes-http';
-  if (args.length && !live && !prepareSite && !interactions) throw new Error('Opção desconhecida.');
+  const playtest = args.length === 1 && args[0] === '--playtest';
+  if (playtest) await isolatedFirestore();
+  if (args.length && !live && !prepareSite && !interactions && !playtest) throw new Error('Opção desconhecida.');
   const database = interactions ? 'freixo-interacoes-' + randomUUID() : DATABASE;
   const alternate = process.env.FREIXO_TEST_ALT_PORTS === '1';
   const ports = freixoEmulatorPorts(alternate);
-  if (alternate && !prepareSite) throw new Error('As portas alternativas são exclusivas da preparação para o teste HTTP.');
+  if (alternate && !prepareSite && !playtest) throw new Error('Modo indisponível nas portas alternativas.');
   if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:' + ports.firestore ||
       process.env.FIREBASE_AUTH_EMULATOR_HOST !== '127.0.0.1:' + ports.auth ||
       process.env.FIREBASE_PROJECT_ID !== PROJECT) throw new Error('Exige os dois emuladores em loopback e o projeto demo.');
@@ -121,11 +125,12 @@ async function run() {
     batch.create(campaignRef, campaign);
     for (const npc of npcs) batch.create(npcCollection.doc(npc.id), npc);
     await batch.commit();
-    if (interactions) {
-      const base = 'http://127.0.0.1:3199';
+    if (interactions || playtest) {
+      const port = playtest ? ports.http : 3199;
+      const base = 'http://127.0.0.1:' + port;
       const child = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
         env: { ...process.env, VITE_FREIXO_LOCAL: 'true', TURN_PLAN_SERVER_COMMIT: 'true',
-          FIRESTORE_DATABASE_ID: database, NARRATOR_MODE: 'fixed', PORT: '3199', DISABLE_HMR: 'true' },
+          FIRESTORE_DATABASE_ID: database, NARRATOR_MODE: 'fixed', PORT: String(port), DISABLE_HMR: 'true' },
         stdio: 'inherit',
       });
       const network = globalThis.fetch;
@@ -143,6 +148,10 @@ async function run() {
           await delay(250);
         }
         globalThis.fetch = (url, options) => network(url === '/api/narrator/turn' ? base + url : url, options);
+        if (playtest) {
+          await collectPlaytest(campaignRef, idToken!);
+          return;
+        }
         const read = async () => (await campaignRef.get()).data() as Campaign;
         for (const [action, minute, location] of [
           ['Observo a cozinha.', 30, familyKitchen],

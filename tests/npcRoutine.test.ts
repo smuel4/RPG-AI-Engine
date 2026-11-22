@@ -105,3 +105,18 @@ test('Henrique encerra o trabalho e só inicia a pausa depois do percurso permit
   assert.equal(refused.moves.length, 0);
   assert.equal(refused.state.activities.length, 1);
 });
+
+for (const { departure, moves, works } of [
+  { departure: 55, moves: true, works: true },
+  { departure: 56, moves: true, works: false },
+  { departure: 57, moves: false, works: false },
+]) {
+  test(`Henrique sai às 10:${departure} em uma espera que atravessa o fim do trabalho`, () => {
+    const start = { ...campaign, worldTime: { ...campaign.worldTime, hour: 10, minute: departure } };
+    const finish = advanceWorldTime(start.worldTime, 10);
+    const result = advanceNpcRoutines(start, finish, [npcs[1]], catalog, undefined, undefined, true);
+
+    assert.deepEqual(result.moves.map(({ to }) => to), moves ? [workshop] : []);
+    assert.deepEqual(result.state.activities.map(({ location }) => location), works ? [workshop] : []);
+  });
+}

@@ -1,12 +1,10 @@
-/**
- * Teste de isolamento entre usuarios NO FIRESTORE EMULATOR LOCAL.
- * Nao faz deploy nem toca no Firebase de producao.
- * Rodar sozinho: npx.cmd tsx --test tests/firestoreOwnershipOfficial.test.ts
- */
+import { isolatedFirestore } from '../scripts/isolated-firestore.mjs';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
 import { doc, getDoc, deleteDoc, setDoc, Timestamp } from 'firebase/firestore';
+
+const isolatedPort = await isolatedFirestore();
 
 const PROJECT_ID = 'demo-rpg-ai-engine';
 const OWNER = 'usuario_dono_local';
@@ -19,7 +17,7 @@ test('Firestore oficial: dono autorizado e outro usuario bloqueado', async () =>
   const env = await initializeTestEnvironment({
     projectId: PROJECT_ID,
     firestore: {
-      host: '127.0.0.1', port: 8080,
+      host: '127.0.0.1', port: isolatedPort,
       rules: readFileSync('firestore.rules', 'utf8'),
     },
   });

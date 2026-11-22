@@ -1,3 +1,4 @@
+import { isolatedFirestore } from '../scripts/isolated-firestore.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp, deleteApp } from 'firebase/app';
@@ -20,6 +21,8 @@ import { turnDocumentIds } from '../src/engine/turnIdentity';
 import { commitPlayerActionTransaction } from '../src/services/campaignRepository';
 import type { Campaign, NarrativeEntry, GameEvent } from '../src/types/game';
 
+const isolatedPort = await isolatedFirestore();
+
 const PROJECT = 'demo-rpg-ai-engine';
 const DATABASE = 'ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704';
 const OWNER_UID = 'dono_teste_narrador';
@@ -31,7 +34,7 @@ function cliente(nome: string, uid: string) {
     nome,
   );
   const db = getFirestore(app, DATABASE);
-  connectFirestoreEmulator(db, '127.0.0.1', 8080, {
+  connectFirestoreEmulator(db, '127.0.0.1', isolatedPort, {
     mockUserToken: {
       user_id: uid,
       email: `${uid}@example.com`,

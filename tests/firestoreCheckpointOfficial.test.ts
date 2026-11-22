@@ -1,10 +1,4 @@
-/**
- * Teste LOCAL e ISOLADO de salvamento de checkpoint usando o Firestore Emulator oficial.
- * Requisitos: emulator Firestore em 127.0.0.1:8080, project ID demo-rpg-ai-engine.
- * Não se conecta ao Firestore de produção, não altera arquivos do aplicativo.
- *
- * Execute na raiz do RPG: npx.cmd tsx --test tests/firestoreCheckpointOfficial.test.ts
- */
+import { isolatedFirestore } from '../scripts/isolated-firestore.mjs';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -12,9 +6,11 @@ import { doc, getDoc, runTransaction, serverTimestamp, setDoc, Timestamp } from 
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import { buildCheckpointPayload } from '../src/engine/rulesEngine';
 
+const isolatedPort = await isolatedFirestore();
+
 const PROJECT_ID = 'demo-rpg-ai-engine';
 const HOST = '127.0.0.1';
-const PORT = 8080;
+const PORT = isolatedPort;
 const UID = 'usuario_teste_local';
 
 test('Firestore oficial: transação completa de salvamento de checkpoint', async () => {

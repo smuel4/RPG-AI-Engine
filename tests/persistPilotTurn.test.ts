@@ -242,6 +242,68 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       for (const [key, value] of original) docs.set(key, value);
     }
   });
+  await t.test('guardar e retirar o bloco exige posse, alcance e armário aberto', async () => {
+    const original = [...docs];
+    const item = path + '/inventory/demo-bloco-madeira';
+    const placement = path + '/pilotObjectLocations/demo-bloco-madeira';
+    const store = 'Guardo o bloco no armário.';
+    const submit = (identity: typeof turn) => persistPilotTurn(db, freixoPlayableCatalog, 'dono', identity,
+      async () => assert.fail('A transferência deve produzir um resultado factual.'));
+    const play = (action: string) => submit(next(action));
+    const refuse = async (action: string, code: string) => {
+      const before = [...docs];
+      await assert.rejects(play(action), { code });
+      assert.deepEqual([...docs], before);
+    };
+    docs.set(path, { ...afterObservation, currentLocation: familyKitchen });
+    try {
+      await play('Abro o armário.');
+      await refuse(store, 'PILOT_OBJECT_NOT_HELD');
+      await refuse('Retiro o bloco do armário.', 'PILOT_STORAGE_EMPTY');
+      await play('Pego o bloco.');
+      await refuse('Vou ao quintal e guardo o bloco no armário.', 'PILOT_TRANSFER_SEQUENCE');
+      await refuse('Guardo o bloco na oficina.', 'PILOT_ACTION_UNSUPPORTED');
+      await refuse('Coloco o bloco no poço.', 'PILOT_OBJECT_UNREGISTERED');
+      await refuse('Coloco o bloco no bloco.', 'PILOT_STORAGE_UNAVAILABLE');
+      await play('Fecho o armário.');
+      await refuse(store, 'PILOT_STORAGE_CLOSED');
+      await play('Abro o armário.');
+      const attempt = next('Coloco o bloco de madeira dentro do armário da cozinha.');
+      const before = [...docs];
+      await assert.rejects(submit({ ...attempt, campaignId: 'outra' }), { code: 'CAMPAIGN_ACCESS_DENIED' });
+      await assert.rejects(submit({ ...attempt, baseTimelineId: 'outra' }), { code: 'CONCURRENT_STATE_CONFLICT' });
+      assert.deepEqual([...docs], before);
+      const answer = await submit(attempt);
+      assert.match(answer.narration, /guardou.*bloco de madeira.*armário/);
+      assert.equal(docs.has(item), false);
+      assert.deepEqual(docs.get(placement), { ownerId: 'dono', campaignId: SERVER_PILOT_ID,
+        timelineId: attempt.baseTimelineId, containerId: 'demo-armario-cozinha' });
+      const saved = structuredClone([...docs]);
+      for (const [key, value] of saved) docs.set(key, value);
+      assert.equal((await submit(attempt)).narration, answer.narration);
+      assert.deepEqual([...docs], saved);
+      await refuse(store, 'PILOT_OBJECT_NOT_HELD');
+      await refuse('Pego o bloco.', 'PILOT_STORAGE_EXPLICIT');
+      await refuse('Largo o bloco.', 'PILOT_OBJECT_NOT_HELD');
+      const kitchen = docs.get(path) as typeof campaign;
+      docs.set(path, { ...kitchen, currentLocation: familyYard });
+      await refuse(store, 'PILOT_STORAGE_DISTANT');
+      await refuse('Pego o bloco do armário.', 'PILOT_STORAGE_DISTANT');
+      docs.set(path, kitchen);
+      await play('Tento retirar o bloco de dentro do armário.');
+      assert.equal(docs.has(placement), false);
+      assert.partialDeepStrictEqual(docs.get(item), { quantity: 1, id: 'demo-bloco-madeira', ownerId: 'dono' });
+
+      docs.delete(item);
+      docs.set(placement, { ownerId: 'dono', campaignId: SERVER_PILOT_ID, timelineId: attempt.baseTimelineId, npcId: henrique.id });
+      await refuse(store, 'PILOT_OBJECT_NOT_HELD');
+      await refuse('Retiro o bloco do armário.', 'PILOT_STORAGE_EMPTY');
+    } finally {
+      docs.clear();
+      for (const [key, value] of original) docs.set(key, value);
+    }
+  });
+
   await t.test('transfere o mesmo bloco entre chão e inventário e preserva o replay', async () => {
     const original = [...docs];
     docs.set(path, { ...afterObservation, currentLocation: familyKitchen });
@@ -478,6 +540,36 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       for (const [key, value] of original) docs.set(key, value);
     }
   });
+  await t.test('chegada às 11h persiste a posição, sem criar histórico de trabalho', async () => {
+    const original = [...docs];
+    const base = { ...afterObservation, currentLocation: workshop,
+      worldTime: { ...afterObservation.worldTime, hour: 10, minute: 56 } };
+    const failNarration = async () => assert.fail('espera, replay e pergunta factual dispensam narrador');
+    docs.set(path, base);
+    docs.set(npcPath + henrique.id, { ...henrique, campaignId: SERVER_PILOT_ID, location: familyYard });
+    docs.set(statePath, { activities: [], observations: [], holds: [] });
+    try {
+      const wait = next('Espero 4 minutos.');
+      const result = await persistPilotTurn(db, freixoPlayableCatalog, 'dono', wait, failNarration);
+      assert.deepEqual((docs.get(path) as typeof campaign).worldTime, advanceWorldTime(base.worldTime, 4));
+      assert.equal((docs.get(npcPath + henrique.id) as typeof henrique).location, workshop);
+      assert.ok(!(docs.get(statePath) as { activities: { npcId: string }[] }).activities
+        .some(({ npcId }) => npcId === henrique.id));
+
+      const committed = structuredClone([...docs]);
+      for (const [key, value] of committed) docs.set(key, value);
+      assert.deepEqual(await persistPilotTurn(db, freixoPlayableCatalog, 'dono', wait, failNarration),
+        { ...result, mode: 'replay' });
+      assert.deepEqual([...docs], committed);
+      const answer = await persistPilotTurn(db, freixoPlayableCatalog, 'dono',
+        next('Henrique, o que você estava fazendo antes?'), failNarration);
+      assert.equal(answer.narration, 'Henrique: “Não sei te dizer com certeza.”');
+    } finally {
+      docs.clear();
+      for (const [key, value] of original) docs.set(key, value);
+    }
+  });
+
   await t.test('respostas factuais usam somente rotina, objeto e testemunho autorizados', async () => {
     const original = [...docs];
     const base = { ...afterObservation, currentLocation: familyKitchen };

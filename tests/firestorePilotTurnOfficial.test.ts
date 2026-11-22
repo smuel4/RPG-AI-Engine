@@ -1,3 +1,4 @@
+import { isolatedFirestore } from '../scripts/isolated-firestore.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
@@ -9,14 +10,16 @@ import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import { advanceWorldTime } from '../src/engine/rulesEngine';
 import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
 
+const isolatedPort = await isolatedFirestore();
+
 test('piloto grava chegada uma vez e o navegador não escreve estado nem recibos', async () => {
-  assert.equal(process.env.FIRESTORE_EMULATOR_HOST, '127.0.0.1:8080');
+  assert.equal(process.env.FIRESTORE_EMULATOR_HOST, '127.0.0.1:' + isolatedPort);
   const projectId = 'demo-rpg-ai-engine';
   const database = 'ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704';
   const admin = initializeApp({ projectId }, 'pilot-admin');
   const app = initializeClient({ projectId, apiKey: 'demo', appId: 'demo' }, 'pilot-owner');
   const browser = clientFirestore(app, database);
-  connectFirestoreEmulator(browser, '127.0.0.1', 8080, {
+  connectFirestoreEmulator(browser, '127.0.0.1', isolatedPort, {
     mockUserToken: { user_id: 'dono', email_verified: true },
   });
   const db = getFirestore(admin, database);

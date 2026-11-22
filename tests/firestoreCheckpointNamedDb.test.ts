@@ -1,3 +1,4 @@
+import { isolatedFirestore } from '../scripts/isolated-firestore.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeApp, deleteApp } from 'firebase/app';
@@ -7,6 +8,8 @@ import {
 } from 'firebase/firestore';
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import { buildCheckpointPayload } from '../src/engine/rulesEngine';
+
+const isolatedPort = await isolatedFirestore();
 
 const PROJECT = 'demo-rpg-ai-engine';
 const DATABASE = 'ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704';
@@ -18,7 +21,7 @@ function cliente(nome: string, uid: string) {
     nome
   );
   const db = getFirestore(app, DATABASE);
-  connectFirestoreEmulator(db, '127.0.0.1', 8080, {
+  connectFirestoreEmulator(db, '127.0.0.1', isolatedPort, {
     mockUserToken: {
       user_id: uid,
       email: 'teste@example.com',

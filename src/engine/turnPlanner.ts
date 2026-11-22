@@ -11,7 +11,7 @@ export interface TurnCatalog {
     description: string; condition?: { activityId: string; initial: string; organize?: { completed: string };
       knownBy?: readonly string[] };
     openable?: { aberto: string; fechado: string };
-    portable?: { ownerNpcId?: string; delivery?: { recipientKey: string; location: string } } }[];
+    portable?: { storageId?: string; ownerNpcId?: string; delivery?: { recipientKey: string; location: string } } }[];
   activities?: readonly { id: string; location: string; participant: string; verb: string;
     target: string; minutes: number; result: string; blocked?: boolean }[];
 }

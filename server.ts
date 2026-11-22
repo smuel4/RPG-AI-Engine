@@ -1,5 +1,6 @@
 ﻿import express from 'express';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -372,9 +373,12 @@ async function startServer() {
     }
   });
 
-  if (!IS_PROD && !alternateTest) {
+  const visualTest = alternateTest && process.env.VITE_FIRESTORE_EMULATOR_PORT === String(emulatorPorts.firestore)
+    && process.env.VITE_AUTH_EMULATOR_PORT === String(emulatorPorts.auth);
+  if (!IS_PROD && (!alternateTest || visualTest)) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
+      ...(visualTest ? { cacheDir: path.join(tmpdir(), 'vite-freixo-visual') } : {}),
       server: { middlewareMode: true },
       appType: 'spa',
     });
