@@ -24,6 +24,7 @@ import { familyKitchen } from './echoArcContinuityFixture';
 import { freixoPlayableCatalog } from './echoArcFreeTurn';
 import { isolatedFirestore } from './isolated-firestore.mjs';
 import { collectPlaytest } from './actionPlaytest';
+import { runFreixoContinuityHttp } from './freixoContinuitySession';
 
 const PROJECT = 'demo-rpg-ai-engine';
 const DATABASE = 'ai-studio-31936b9f-7516-468c-9cf4-6dd4da7fb704';
@@ -49,18 +50,21 @@ async function run() {
   const prepareSite = args.length === 1 && args[0] === '--preparar-site';
   const interactions = args.length === 1 && args[0] === '--interacoes-http';
   const playtest = args.length === 1 && args[0] === '--playtest';
-  if (playtest) await isolatedFirestore();
-  if (args.length && !live && !prepareSite && !interactions && !playtest) throw new Error('Opção desconhecida.');
+  const continuity = args.length === 1 && (args[0] === '--continuity' || args[0] === '--continuity-smoke');
+  if (playtest || continuity) await isolatedFirestore();
+  if (args.length && !live && !prepareSite && !interactions && !playtest && !continuity) throw new Error('Opção desconhecida.');
   const database = interactions ? 'freixo-interacoes-' + randomUUID() : DATABASE;
   const alternate = process.env.FREIXO_TEST_ALT_PORTS === '1';
   const ports = freixoEmulatorPorts(alternate);
-  if (alternate && !prepareSite && !playtest) throw new Error('Modo indisponível nas portas alternativas.');
+  if (alternate && !prepareSite && !playtest && !continuity) throw new Error('Modo indisponível nas portas alternativas.');
   if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:' + ports.firestore ||
       process.env.FIREBASE_AUTH_EMULATOR_HOST !== '127.0.0.1:' + ports.auth ||
       process.env.FIREBASE_PROJECT_ID !== PROJECT) throw new Error('Exige os dois emuladores em loopback e o projeto demo.');
   if (live && !process.env.GROQ_API_KEY?.trim()) throw new Error('GROQ_API_KEY precisa estar disponível no ambiente do processo.');
 
-  const logPath = join(await mkdtemp(join(tmpdir(), 'echo-arc-mundo-vivo-')), 'sessao.jsonl');
+  const logPath = continuity ? process.env.ECHO_CONTINUITY_REPORT
+    : join(await mkdtemp(join(tmpdir(), 'echo-arc-mundo-vivo-')), 'sessao.jsonl');
+  assert.ok(logPath, 'Use o launcher descartável para gravar o relatório.');
   console.info('Registro:', logPath);
   const log = (record: object) => appendFile(logPath, JSON.stringify(record) + '\n', 'utf8');
   let generations = 0;
@@ -117,7 +121,8 @@ async function run() {
     if (!ownerId || ownerId !== user.uid) throw new Error('Identidade local não confirmada.');
 
     const bundle = createEchoArcBundle(ownerId);
-    const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen };
+    const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen,
+      ...(continuity ? { worldTime: { ...bundle.campaign.worldTime, hour: 10, minute: 0 } } : {}) };
     const lira = createWellEncounterNpc(ownerId, SERVER_PILOT_ID);
     const npcs = pilotNpcs(bundle, lira);
     const catalog = freixoPlayableCatalog;
@@ -125,8 +130,8 @@ async function run() {
     batch.create(campaignRef, campaign);
     for (const npc of npcs) batch.create(npcCollection.doc(npc.id), npc);
     await batch.commit();
-    if (interactions || playtest) {
-      const port = playtest ? ports.http : 3199;
+    if (interactions || playtest || continuity) {
+      const port = playtest || continuity ? ports.http : 3199;
       const base = 'http://127.0.0.1:' + port;
       const child = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
         env: { ...process.env, VITE_FREIXO_LOCAL: 'true', TURN_PLAN_SERVER_COMMIT: 'true',
@@ -148,6 +153,10 @@ async function run() {
           await delay(250);
         }
         globalThis.fetch = (url, options) => network(url === '/api/narrator/turn' ? base + url : url, options);
+        if (continuity) {
+          await runFreixoContinuityHttp(campaignRef, idToken!, args[0] === '--continuity-smoke' ? 4 : 40, log);
+          return;
+        }
         if (playtest) {
           await collectPlaytest(campaignRef, idToken!);
           return;

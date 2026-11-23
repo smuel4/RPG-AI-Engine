@@ -15,19 +15,81 @@ import { claimsUnconfirmedPlayerConsequence } from '../server/pilotNarrativeInte
 import { familyKitchen } from '../scripts/echoArcContinuityFixture';
 import { familyYard, freixoPlayableCatalog } from '../scripts/echoArcFreeTurn';
 import { requestNarratorTurn } from '../src/services/narratorClient';
+import { continuityCollections, continuitySecret, verifyFreixoContinuity,
+  type ContinuitySnapshot } from '../scripts/freixoContinuitySession';
 
-const recordedGroqArrival = "O poço da Vila de Freixo surge como um círculo de pedra escura ladeado por trepadeiras de flores silvestres, onde a água reflete o céu matutino ainda levemente rosado. Ao redor, alguns aldeões carregam baldes de madeira; um velho pescador bate o pé na borda, enquanto duas crianças correm entre as sombras das casas, lançando risos que se perdem no canto do vento. Lira, de cabelos trançados e avental manchado de terra, está inclinada sobre o balde, enchendo‑o com cuidado antes de virar-se para conversar com quem se aproximar.  \n\n**Destinos disponíveis agora:**  \n- Quintal da casa da família, Vila de Freixo  \n- Cozinha da casa da família, Vila de Freixo";
+test('sessão de Freixo preserva consequências e conhecimento após 40 turnos autoritativos', async () => {
+  for (const limit of [4, 40] as const) {
+    const ownerId = 'dono-continuidade';
+    const bundle = createEchoArcBundle(ownerId);
+    const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen,
+      worldTime: { ...bundle.campaign.worldTime, hour: 10, minute: 0 } };
+    const path = 'campaigns/' + campaign.id;
+    const lira = createWellEncounterNpc(ownerId, campaign.id);
+    const [teresa, henrique] = bundle.npcs;
+    const docs = new Map<string, object>([[path, campaign]]);
+    for (const npc of [{ ...teresa, location: familyKitchen }, henrique, lira]) {
+      docs.set(path + '/npcs/' + npc.id, { ...npc, campaignId: campaign.id });
+    }
+    const db = memoryFirestore(docs);
+    let recipientChecks = 0;
+    await verifyFreixoContinuity({
+      read: async () => structuredClone({
+        campaign: docs.get(path) as typeof campaign,
+        docs: Object.fromEntries(continuityCollections.map((name) => {
+          const prefix = path + '/' + name + '/';
+          return [name, Object.fromEntries([...docs].filter(([key]) => key.startsWith(prefix))
+            .map(([key, value]) => [key.slice(prefix.length), value]))];
+        })) as ContinuitySnapshot['docs'],
+      }),
+      send: (turn) => persistPilotTurn(db, freixoPlayableCatalog, ownerId, turn,
+        async (arrival, sceneIntent, present, relationships, narrative, action) => {
+          const context = buildNarratorContext({ campaign: arrival, inventory: [], npcs: present.npcs, narrative,
+            sceneKnowledge: present.knowledge, npcActivities: present.activities,
+            npcMemories: present.memories, npcRelationships: relationships });
+          const prompt = buildNarratorPrompt({ context, sceneIntent, declaredAction: action });
+          if (action === 'Digo a Teresa: Obrigado.') {
+            assert.ok(prompt.includes(continuitySecret), 'Teresa perdeu acesso à confidência');
+            assert.match(prompt, /Entreguei o bloco a Henrique/);
+            assert.ok(present.memories.some(({ name, memories }) => name === 'Teresa' &&
+              memories.some(({ fact, source, speaker }) => fact === continuitySecret &&
+                source === 'reported' && speaker === 'Samuel')));
+            recipientChecks++;
+          }
+          if (action === 'Digo a Henrique: Obrigado.') {
+            assert.ok(!prompt.includes(continuitySecret), 'confidência vazou para Henrique');
+            assert.match(prompt, /bloco de madeira/);
+            assert.ok(present.memories.some(({ name, memories }) => name === 'Henrique' &&
+              memories.some(({ source }) => source === 'participated')));
+            recipientChecks++;
+          }
+          if (action === 'Digo a Lira: Como vai?') {
+            assert.ok(!prompt.includes(continuitySecret), 'confidência vazou para Lira');
+            recipientChecks++;
+          }
+          return sceneIntent.startsWith('Mostre a reação')
+            ? 'A fala encontra uma pausa atenta.' : 'O movimento da manhã segue ao redor.';
+        }),
+      log: (record) => {
+        if (process.env.ECHO_CONTINUITY_TRACE === '1' || 'step' in record) console.info(JSON.stringify(record));
+      },
+    }, limit);
+    assert.equal(recipientChecks, limit === 40 ? 3 : 0);
+    if (limit === 40 && process.env.ECHO_CONTINUITY_TRACE === '1') {
+      console.info(JSON.stringify({ type: 'prompt-checks', count: recipientChecks,
+        checks: ['Teresa recebe memória pessoal e relato', 'Lira não recebe a confidência',
+          'Henrique recebe a entrega, mas não a confidência'] }));
+    }
+  }
+});
 
-test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', async (t) => {
-  const campaign = { ...createEchoArcBundle('dono').campaign, id: SERVER_PILOT_ID, currentLocation: 'Porto' };
-  const path = 'campaigns/' + SERVER_PILOT_ID;
-  const docs = new Map<string, object>([[path, campaign]]);
+function memoryFirestore(docs: Map<string, object>) {
   const collection = (parent: string) => ({
     doc: (id: string) => ({ path: parent + '/' + id, collection: (name: string) => collection(parent + '/' + id + '/' + name) }),
     where: () => ({ limit: () => ({ parent }) }),
     orderBy: () => ({ limit: () => ({ parent }) }),
   });
-  const db = {
+  return {
     collection,
     async runTransaction<T>(fn: (tx: object) => Promise<T>) {
       const writes = new Map<string, object | null>();
@@ -52,6 +114,15 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       return result;
     },
   } as unknown as Firestore;
+}
+
+const recordedGroqArrival = "O poço da Vila de Freixo surge como um círculo de pedra escura ladeado por trepadeiras de flores silvestres, onde a água reflete o céu matutino ainda levemente rosado. Ao redor, alguns aldeões carregam baldes de madeira; um velho pescador bate o pé na borda, enquanto duas crianças correm entre as sombras das casas, lançando risos que se perdem no canto do vento. Lira, de cabelos trançados e avental manchado de terra, está inclinada sobre o balde, enchendo‑o com cuidado antes de virar-se para conversar com quem se aproximar.  \n\n**Destinos disponíveis agora:**  \n- Quintal da casa da família, Vila de Freixo  \n- Cozinha da casa da família, Vila de Freixo";
+
+test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', async (t) => {
+  const campaign = { ...createEchoArcBundle('dono').campaign, id: SERVER_PILOT_ID, currentLocation: 'Porto' };
+  const path = 'campaigns/' + SERVER_PILOT_ID;
+  const docs = new Map<string, object>([[path, campaign]]);
+  const db = memoryFirestore(docs);
   const turn = { turnId: crypto.randomUUID(), campaignId: SERVER_PILOT_ID, declaredAction: 'Vou até a praça',
     advanceMinutes: 720, expectedRevision: campaign.revision, baseTimelineId: campaign.activeTimelineId || 'tl_root' };
   const catalog = { places: [{ id: 'Porto', aliases: [] }, { id: 'Praça', aliases: [] }],

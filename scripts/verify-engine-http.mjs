@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { copyFile, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +32,8 @@ function checkPort(port) {
 
 const full = process.argv[2] === '--full';
 const playtest = process.argv[2] === '--playtest';
-const disposable = full || playtest;
+const continuity = process.argv[2] === '--continuity' || process.argv[2] === '--continuity-smoke';
+const disposable = full || playtest || continuity;
 const started = performance.now();
 let ownedDirectory;
 try {
@@ -46,9 +47,11 @@ try {
       throw new Error('Falha ao preparar o piloto descartável.');
     }
     process.exitCode = run(['--import', 'tsx', 'server.ts'], root, env);
-  } else if (process.argv[2] === '--run-playtest') {
+  } else if (process.argv[2] === '--run-playtest' || process.argv[2] === '--run-continuity') {
     await isolatedFirestore();
-    process.exitCode = run(['--import', 'tsx', 'scripts/validacao-mundo-vivo.ts', '--playtest'], root,
+    const mode = process.argv[2] === '--run-playtest' ? '--playtest'
+      : process.env.ECHO_CONTINUITY_LIMIT === '4' ? '--continuity-smoke' : '--continuity';
+    process.exitCode = run(['--import', 'tsx', 'scripts/validacao-mundo-vivo.ts', mode], root,
       { ...process.env, FIREBASE_PROJECT_ID: project });
   } else if (process.argv[2] === '--run-full') {
     const failures = [];
@@ -85,6 +88,27 @@ try {
       }
     }
     if (full && run(['scripts/check.mjs'], root, process.env)) throw new Error('Gate local reprovado.');
+    if (continuity || full) {
+      // Check loopback before launching Firebase, whose hub would otherwise time out.
+      const probe = createServer();
+      await new Promise((resolve, reject) => {
+        probe.once('error', reject);
+        probe.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        await new Promise((resolve, reject) => {
+          const connection = createConnection(probe.address().port, '127.0.0.1');
+          connection.setTimeout(5000, () => connection.destroy(new Error('Timeout no teste TCP local.')));
+          connection.once('error', reject);
+          connection.once('connect', () => {
+            connection.destroy();
+            resolve();
+          });
+        });
+      } finally {
+        await new Promise(resolve => probe.close(resolve));
+      }
+    }
     const ports = freixoEmulatorPorts(alternate);
     for (const [name, port] of Object.entries(ports)) {
       try {
@@ -127,9 +151,15 @@ try {
       env.ECHO_PLAYTEST_OUTPUT = await mkdtemp(join(tmpdir(), 'echo-arc-playtest-'));
       console.log('Relatório local:', env.ECHO_PLAYTEST_OUTPUT);
     }
+    if (continuity) {
+      env.ECHO_CONTINUITY_LIMIT = process.argv[2] === '--continuity-smoke' ? '4' : '40';
+      const report = await mkdtemp(join(tmpdir(), 'echo-arc-continuity-'));
+      env.ECHO_CONTINUITY_REPORT = join(report, 'sessao.jsonl');
+      console.log('Relatório local:', env.ECHO_CONTINUITY_REPORT);
+    }
     if (full) console.log('Portas descartáveis:', ports);
     const firebase = join(root, 'node_modules', 'firebase-tools', 'lib', 'bin', 'firebase.js');
-    const command = `node "${fileURLToPath(import.meta.url)}" ${playtest ? '--run-playtest' : full ? '--run-full' : visual ? '--serve-visual' : '--run-test'}`;
+    const command = `node "${fileURLToPath(import.meta.url)}" ${playtest ? '--run-playtest' : continuity ? '--run-continuity' : full ? '--run-full' : visual ? '--serve-visual' : '--run-test'}`;
     process.exitCode = run([firebase, 'emulators:exec', '--only', 'auth,firestore',
       '--project', 'demo-rpg-ai-engine', '--non-interactive', command], directory, env);
   }
