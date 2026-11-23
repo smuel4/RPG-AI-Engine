@@ -6,7 +6,7 @@ export type NpcMemoryOrigin =
   | { kind: 'participated'; subjectId: string; event: 'delivery' | 'organization' }
   | { kind: 'reported'; reporterId: string; speakerName?: string }
   | { kind: 'interpretation'; evidenceId: string }
-  | { kind: 'consequence'; effect: 'commitment' | 'relationship'; subjectId: string };
+  | { kind: 'consequence'; effect: 'commitment' | 'relationship' | 'proposal'; subjectId: string };
 
 export interface NpcMemory {
   npcId: string;

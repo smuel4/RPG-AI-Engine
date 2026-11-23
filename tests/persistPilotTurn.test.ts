@@ -9,14 +9,297 @@ import { advanceWorldTime } from '../src/engine/rulesEngine';
 import { turnDocumentIds } from '../src/engine/turnIdentity';
 import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
 import { freixoWoodWorkshop } from '../src/engine/npcIdentity';
+import type { NpcRoutineState } from '../src/engine/npcRoutine';
 import { buildNarratorContext } from '../server/narratorMemory';
-import { buildNarratorPrompt } from '../server/narratorProvider';
+import { buildNarratorPrompt, NarratorFailure } from '../server/narratorProvider';
 import { claimsUnconfirmedPlayerConsequence } from '../server/pilotNarrativeIntegrity';
 import { familyKitchen } from '../scripts/echoArcContinuityFixture';
 import { familyYard, freixoPlayableCatalog } from '../scripts/echoArcFreeTurn';
 import { requestNarratorTurn } from '../src/services/narratorClient';
 import { continuityCollections, continuitySecret, verifyFreixoContinuity,
   type ContinuitySnapshot } from '../scripts/freixoContinuitySession';
+
+test('exploração distingue localização, consulta, conversa e destinos indisponíveis', async () => {
+  const owner = 'dono';
+  const bundle = createEchoArcBundle(owner);
+  const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen };
+  const [teresa] = bundle.npcs;
+  const lira = createWellEncounterNpc(owner, campaign.id);
+  const path = 'campaigns/' + campaign.id;
+  const docs = new Map<string, object>([[path, campaign], [path + '/npcs/' + lira.id, lira],
+    [path + '/npcs/' + teresa.id, { ...teresa, campaignId: campaign.id, location: familyKitchen }]]);
+  const db = memoryFirestore(docs);
+  const catalog = freixoPlayableCatalog;
+  const state = () => docs.get(path) as typeof campaign;
+  const send = (declaredAction: string, narrate: Parameters<typeof persistPilotTurn>[4] = async () => 'A luz ilumina as pedras.',
+    activeCatalog: Parameters<typeof persistPilotTurn>[1] = catalog) =>
+    persistPilotTurn(db, activeCatalog, owner, {
+      campaignId: campaign.id, turnId: crypto.randomUUID(), baseTimelineId: state().activeTimelineId || 'tl_root',
+      expectedRevision: state().revision, advanceMinutes: 10, declaredAction,
+    }, narrate);
+  const factual = async () => assert.fail('Consulta factual chamou o narrador.');
+  const start = state();
+  await assert.rejects(send('Quero conversar com Lira.'), { code: 'PILOT_SPEECH_UNAVAILABLE', absentNpcName: 'Lira' });
+  await assert.rejects(send('Quero explorar o bosque.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'unknown-destination' });
+  await assert.rejects(send('Vou ao poço ou à oficina.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'ambiguous-destination' });
+  await assert.rejects(send('Vou ao poço.', factual, { ...catalog, routes: [] }),
+    { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'unknown-route' });
+  assert.equal(state(), start);
+  assert.match((await send('Onde posso encontrar Lira?', factual)).narration, /nem confirmar onde/);
+  assert.match((await send('Será que existe um caminho para o bosque?', factual)).narration, /não reconhece/);
+  assert.match((await send('Como chego ao poço?', factual)).narration, /caminho acessível.*6 min/);
+  assert.equal(state().currentLocation, familyKitchen);
+  assert.deepEqual(state().worldTime, start.worldTime);
+  await send('Confidencio a Teresa: ' + continuitySecret);
+  await send('Pergunto a Teresa o que ela sabe sobre a vila.', async (_scene, _intent, present, _relations, _history, action) => {
+    assert.deepEqual(present.npcs.map(({ id }) => id), [teresa.id]);
+    assert.match(action, /sobre a vila/);
+    return 'Teresa escuta.';
+  });
+  await send('Quero explorar o poço.');
+  assert.equal(state().currentLocation, villageWell);
+  assert.deepEqual(state().worldTime, advanceWorldTime(start.worldTime, 6));
+  assert.match((await send('Onde posso encontrar Lira?', factual)).narration, /Lira está aqui/);
+  await send('Examino o poço.');
+  await send('Dou uma olhada nos arredores.');
+  await send('Quero conversar com Lira.');
+  const turn = { campaignId: campaign.id, turnId: crypto.randomUUID(), baseTimelineId: state().activeTimelineId || 'tl_root',
+    expectedRevision: state().revision, advanceMinutes: 10, declaredAction: 'Converso com Lira sobre o poço.' };
+  const dialogue = await persistPilotTurn(db, catalog, owner, turn, async (_scene, intent, present, _relations, history, action) => {
+    assert.deepEqual(present.npcs.map(({ id }) => id), [lira.id]);
+    assert.match(intent, /discurso indireto/);
+    assert.match(action, /sobre o poço/);
+    assert.ok(!JSON.stringify({ present, history }).includes(continuitySecret));
+    return 'Lira escuta.';
+  });
+  const after = structuredClone([...docs]);
+  assert.equal((await persistPilotTurn(db, catalog, owner, turn, factual)).narration, dialogue.narration);
+  assert.deepEqual(structuredClone([...docs]), after);
+  assert.equal(state().currentLocation, villageWell);
+  assert.deepEqual(state().worldTime, advanceWorldTime(start.worldTime, 6));
+  docs.set(path, { ...state(), setting: 'A história local menciona o bosque.' });
+  await assert.rejects(send('Vou ao bosque.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'uncatalogued-destination' });
+});
+
+test('oferta de Teresa é visível, privada e responde uma vez à decisão de Samuel', async (t) => {
+  for (const [decision, command] of [
+    ['accepted', 'Aceito a companhia.'],
+    ['accepted', 'Teresa, pode vir comigo.'],
+    ['accepted', 'Pode me acompanhar, mãe.'],
+    ['accepted', 'Quero que você venha comigo.'],
+    ['accepted', 'Sim, vamos juntos.'],
+    ['declined', 'Teresa, não aceito.'],
+    ['pending', null],
+  ] as const) {
+    await t.test(command ?? decision, async () => {
+      const owner = 'dono';
+      const bundle = createEchoArcBundle(owner);
+      const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen,
+        activeTimelineId: 'tl_playtest_' + decision };
+      const [teresa, henrique] = bundle.npcs;
+      const path = 'campaigns/' + campaign.id;
+      const timeline = campaign.activeTimelineId ?? 'tl_root';
+      const docs = new Map<string, object>([[path, campaign], ...[teresa, henrique].map((npc) =>
+        [path + '/npcs/' + npc.id, { ...npc, campaignId: campaign.id, location: familyKitchen }] as const)]);
+      const db = memoryFirestore(docs);
+      const state = () => docs.get(path) as typeof campaign;
+      const runtime = (id = timeline) => docs.get(path + '/npcRoutineState/' + id) as NpcRoutineState | undefined;
+      const next = (declaredAction: string) => ({ turnId: crypto.randomUUID(), campaignId: campaign.id,
+        declaredAction, advanceMinutes: 10, expectedRevision: state().revision, baseTimelineId: timeline });
+      const fixed = async () => 'A conversa segue em tom tranquilo.';
+      const noGeneration = async () => assert.fail('A resposta social deve ser confirmada pela engine.');
+      const trace = (entry: object) => {
+        if (process.env.ECHO_SOCIAL_TRACE === '1') console.info(JSON.stringify({ scenario: decision, ...entry }));
+      };
+      const send = async (turn: ReturnType<typeof next>, narrate: Parameters<typeof persistPilotTurn>[4] = fixed) => {
+        const before = runtime()?.bridgeOffer?.status ?? 'none';
+        const replay = docs.has(path + '/turnReceipts/' + turn.turnId);
+        try {
+          const result = await persistPilotTurn(db, freixoPlayableCatalog, owner, turn, narrate);
+          trace({ command: turn.declaredAction, replay, shown: result.narration, before,
+            after: runtime()?.bridgeOffer?.status ?? 'none', time: state().worldTime, location: state().currentLocation });
+          return result;
+        } catch (error) {
+          trace({ command: turn.declaredAction, before, after: runtime()?.bridgeOffer?.status ?? 'none',
+            feedback: error instanceof PilotTurnError ? describePilotFeedback(error, false) : undefined });
+          throw error;
+        }
+      };
+      const beforeInvalid = structuredClone([...docs]);
+      await assert.rejects(send(next('Aceito a companhia.')), { code: 'PILOT_BRIDGE_OFFER_UNAVAILABLE' });
+      assert.deepEqual(structuredClone([...docs]), beforeInvalid);
+      await send(next('Quero conversar com Teresa.'));
+      assert.equal((await send(next('Teresa, pode vir comigo.'))).narration, await fixed());
+      assert.equal(runtime()?.bridgeOffer, undefined);
+      await send(next('Confidencio a Teresa: ' + continuitySecret));
+      assert.equal(runtime()?.bridgeOffer, undefined);
+      const offer = next('Quero conversar com Teresa.');
+      const offered = await send(offer, noGeneration);
+      assert.match(offered.narration, /posso atravessar a ponte com você/);
+      const offerEntry = await turnDocumentIds(offer);
+      assert.partialDeepStrictEqual(docs.get(path + '/narrative/' + offerEntry.engine),
+        { content: offered.narration, privateRecipientId: teresa.id });
+      const pending = { id: offer.turnId, npcId: teresa.id, recipientId: 'player', status: 'pending' };
+      assert.deepEqual(runtime()?.bridgeOffer, pending);
+      assert.deepEqual(await send(offer, noGeneration), offered);
+      const duplicate = await send(next('Quero conversar com Teresa.'), async (_scene, intent) => {
+        assert.match(intent, /aguarda resposta de Samuel/);
+        return fixed();
+      });
+      assert.doesNotMatch(duplicate.narration, /posso atravessar a ponte/);
+      if (decision === 'pending') {
+        const beforeDefer = state();
+        await send(next('Vou pensar.'), noGeneration);
+        for (const uncertain of ['Teresa, talvez eu aceite.', 'Talvez você possa vir comigo.',
+          'E se você viesse comigo?', 'Vou pensar melhor.', 'Se eu aceitar, quando vamos?']) {
+          const turn = next(uncertain);
+          const reply = await send(turn, noGeneration);
+          assert.match(reply.narration, /oferta continua em aberto/);
+          assert.partialDeepStrictEqual(docs.get(path + '/narrative/' + (await turnDocumentIds(turn)).engine),
+            { content: reply.narration, privateRecipientId: teresa.id });
+          assert.deepEqual(runtime()?.bridgeOffer, pending);
+        }
+        assert.equal((await send(next('Teresa, pode vir comigo até a oficina.'))).narration, await fixed());
+        assert.equal((await send(next('Henrique, pode vir comigo.'))).narration, await fixed());
+        await assert.rejects(send(next('Sim, vamos juntos.')), { code: 'PILOT_ACTION_UNSUPPORTED' });
+        assert.equal(state().currentLocation, beforeDefer.currentLocation);
+        assert.deepEqual(state().worldTime, beforeDefer.worldTime);
+      }
+      assert.deepEqual(runtime()?.bridgeOffer, pending);
+      const before = state();
+      const relationships = runtime()?.relationships;
+      if (command) {
+        const reply = next(command);
+        const confirmed = await send(reply, noGeneration);
+        assert.match(confirmed.narration, decision === 'accepted' ? /Combinado/ : /Respeito sua escolha/);
+        assert.deepEqual(runtime()?.bridgeOffer, { ...pending, status: decision, decisionTurnId: reply.turnId });
+        const snapshot = structuredClone([...docs]);
+        assert.equal((await send(reply, noGeneration)).narration, confirmed.narration);
+        assert.deepEqual(structuredClone([...docs]), snapshot);
+        await assert.rejects(send(next('Aceito a companhia.'), noGeneration), { code: 'PILOT_BRIDGE_OFFER_UNAVAILABLE' });
+        assert.deepEqual(structuredClone([...docs]), snapshot);
+      }
+      assert.equal(state().currentLocation, before.currentLocation);
+      assert.deepEqual(state().worldTime, before.worldTime);
+      assert.deepEqual(runtime()?.relationships, relationships);
+      await send(next('Examino o armário.'));
+      await send(next('Espero 10 minutos.'));
+      assert.deepEqual(state().worldTime, advanceWorldTime(before.worldTime, 10));
+      assert.equal(runtime()?.bridgeOffer?.status, decision);
+      await send(next('Digo a Teresa: Obrigado.'), async (_scene, intent, present) => {
+        assert.match(intent, decision === 'accepted' ? /foi aceita/ : decision === 'declined' ? /foi recusada/ : /aguarda resposta/);
+        const memories = present.memories.flatMap(({ memories }) => memories);
+        assert.ok(memories.some(({ fact }) => fact === continuitySecret));
+        assert.deepEqual(memories.filter(({ source }) => source === 'consequence').map(({ fact }) => fact),
+          decision === 'pending' ? [] : [
+            'Samuel ' + (decision === 'accepted' ? 'aceitou' : 'recusou') + ' a oferta de companhia para atravessar a ponte.',
+          ]);
+        trace({ context: 'Teresa', memories, offerStatus: runtime()?.bridgeOffer?.status });
+        return fixed();
+      });
+      await send(next('Digo a Henrique: Bom dia.'), async (_scene, intent, present, _relations, history) => {
+        assert.doesNotMatch(JSON.stringify({ intent, present, history }), /oferta de Teresa|oferta de companhia|posso atravessar|Tenho receio/);
+        trace({ context: 'Henrique', privateOfferOrDisclosure: false });
+        return fixed();
+      });
+      const original = state();
+      docs.set(path, { ...original, activeTimelineId: timeline + '_outro' });
+      const isolated = await persistPilotTurn(db, freixoPlayableCatalog, owner,
+        { ...next('Teresa, pode vir comigo.'), baseTimelineId: timeline + '_outro' },
+        async (_scene, intent, present, _relationships, history) => {
+          assert.doesNotMatch(JSON.stringify({ intent, present, history }), /oferta de Teresa|posso atravessar|Tenho receio/);
+          return fixed();
+        });
+      assert.equal(isolated.narration, await fixed());
+      assert.equal(runtime(timeline + '_outro')?.bridgeOffer, undefined);
+      assert.equal(runtime()?.bridgeOffer?.status, decision);
+    });
+  }
+});
+
+test('grava somente transições de abertura confirmadas pela engine', async () => {
+  const bundle = createEchoArcBundle('dono');
+  const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen };
+  const path = 'campaigns/' + campaign.id;
+  const timeline = campaign.activeTimelineId ?? 'tl_root';
+  const teresa = bundle.npcs[0];
+  const docs = new Map<string, object>([[path, campaign],
+    [path + '/npcs/' + teresa.id, { ...teresa, campaignId: campaign.id, location: familyKitchen }]]);
+  const db = memoryFirestore(docs);
+  const historical = "Teresa ergue a cabeça da tábua de pão que estava preparando, o sorriso suave ampliando-se ao ouvir a saudação do filho. “Bom dia, Samuel,” responde ela, a voz calma envolvendo a cozinha enquanto fecha delicadamente o armário ao seu lado. Um leve aroma de ervas frescas se mistura ao cheiro do pão recém-assado, e ela ajeita um prato de frutas na bancada, pronta para seguir a rotina matinal. Por um instante, o sol que entra pela janela ilumina o canto onde eles estão, trazendo a sensação tranquila de um novo dia na vila.";
+  const homonyms = { ...freixoPlayableCatalog, objects: [...freixoPlayableCatalog.objects, {
+    id: 'armario-oficina', name: 'armário', aliases: ['armário da oficina'], location: freixoWoodWorkshop,
+    description: 'Um armário.', openable: { aberto: 'Aberto.', fechado: 'Fechado.' },
+  }] };
+  for (const [generated, blocked, catalog = freixoPlayableCatalog] of [
+    [historical, true],
+    ['Teresa abre o armário.', true],
+    ['Teresa toca no armário fechado.', false],
+    ['Teresa sugere abrir o armário.', false],
+    ['Teresa diz: “Não abri o armário.”', false],
+    ['Teresa não fecha o armário.', false],
+    ['Se Teresa fecha o armário, a madeira range.', false],
+    ['Teresa lembra que fechou o armário ontem.', false],
+    ['Teresa fecha o armário.', false, homonyms],
+    ['Teresa fecha o armário da cozinha.', true, homonyms],
+  ] as const) {
+    const turn = { turnId: crypto.randomUUID(), campaignId: campaign.id, declaredAction: 'Digo a Teresa: Bom dia, mãe.',
+      advanceMinutes: 10, expectedRevision: (docs.get(path) as typeof campaign).revision, baseTimelineId: timeline };
+    await persistPilotTurn(db, catalog, 'dono', turn, async () => generated);
+    const expected = blocked ? 'A conversa faz uma pausa.' : generated;
+    const ids = await turnDocumentIds(turn);
+    assert.partialDeepStrictEqual(docs.get(path + '/narrative/' + ids.engine), { content: expected });
+    assert.ok(!(docs.get(path + '/npcRoutineState/' + timeline) as { openObjects?: string[] } | undefined)?.openObjects?.length);
+    const beforeReplay = structuredClone([...docs]);
+    const replay = await persistPilotTurn(db, catalog, 'dono', turn, async () => assert.fail('renarrou'));
+    assert.equal(replay.narration, expected);
+    assert.deepEqual(structuredClone([...docs]), beforeReplay);
+  }
+  const open = { turnId: crypto.randomUUID(), campaignId: campaign.id, declaredAction: 'Abro o armário.',
+    advanceMinutes: 10, expectedRevision: (docs.get(path) as typeof campaign).revision, baseTimelineId: timeline };
+  await persistPilotTurn(db, freixoPlayableCatalog, 'dono', open, async () => assert.fail('abertura depende da engine'));
+  assert.deepEqual((docs.get(path + '/npcRoutineState/' + timeline) as { openObjects: string[] }).openObjects, ['demo-armario-cozinha']);
+  assert.partialDeepStrictEqual(docs.get(path + '/narrative/' + (await turnDocumentIds(open)).engine),
+    { content: 'O armário está aberto.' });
+});
+
+test('chegada preserva o local de objetos fixos e descarta prosa conflitante antes de persistir', async () => {
+  const owner = 'dono';
+  const campaign = { ...createEchoArcBundle(owner).campaign, id: SERVER_PILOT_ID, currentLocation: familyKitchen };
+  const path = 'campaigns/' + campaign.id;
+  const timelineId = campaign.activeTimelineId ?? 'tl_root';
+  const docs = new Map<string, object>([[path, campaign]]);
+  const db = memoryFirestore(docs);
+  const next = (declaredAction: string) => ({ turnId: crypto.randomUUID(), expectedRevision: (docs.get(path) as typeof campaign).revision,
+    campaignId: campaign.id, declaredAction, advanceMinutes: 10, baseTimelineId: timelineId });
+  await persistPilotTurn(db, freixoPlayableCatalog, owner, next('Escancaro o armário.'), async () => assert.fail('narrou abertura'));
+  const travel = next('Vou ao quintal.');
+  const beforeTravel = structuredClone([...docs]);
+  await assert.rejects(persistPilotTurn(db, freixoPlayableCatalog, owner, travel, async () => {
+    throw new NarratorFailure('GROQ_HTTP_ERROR', 'provider_http', 429);
+  }), { code: 'GROQ_HTTP_ERROR', status: 429 });
+  assert.deepEqual(structuredClone([...docs]), beforeTravel);
+  const invented = 'No quintal, o armário recém-aberto permanece com as portas escancaradas.';
+  const result = await persistPilotTurn(db, freixoPlayableCatalog, owner, travel,
+    async (arrival, sceneIntent, present, relationships, narrative, declaredAction) => {
+      const context = buildNarratorContext({ campaign: arrival, inventory: [], npcs: present.npcs, narrative,
+        sceneKnowledge: present.knowledge, npcMemories: present.memories, npcRelationships: relationships });
+      const prompt = buildNarratorPrompt({ context, sceneIntent, declaredAction });
+      assert.match(prompt, /O armário está aberto/);
+      assert.match(sceneIntent, /estado prevalece sobre a prosa do histórico/);
+      assert.ok(sceneIntent.includes(JSON.stringify({ name: 'armário', location: familyKitchen, state: 'aberto' })));
+      return invented;
+    });
+  assert.equal(result.narration, 'Nada mais se destaca neste momento.');
+  assert.equal((docs.get(path) as typeof campaign).currentLocation, familyYard);
+  assert.deepEqual((docs.get(path + '/npcRoutineState/' + timelineId) as { openObjects: string[] }).openObjects, ['demo-armario-cozinha']);
+  assert.ok(!JSON.stringify([...docs]).includes(invented));
+  await assert.rejects(persistPilotTurn(db, freixoPlayableCatalog, owner, next('Fecho o armário.'), async () =>
+    assert.fail('narrou interação distante')), { code: 'PILOT_OBJECT_OUT_OF_REACH' });
+  const creative = 'Um armário de nuvens parece desenhado no céu.';
+  const observation = await persistPilotTurn(db, freixoPlayableCatalog, owner, next('Observo o quintal.'), async () => creative);
+  assert.equal(observation.narration, creative);
+});
 
 test('sessão de Freixo preserva consequências e conhecimento após 40 turnos autoritativos', async () => {
   for (const limit of [4, 40] as const) {
@@ -767,7 +1050,12 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
     async () => assert.fail('revisão antiga')), /CONCURRENT_STATE_CONFLICT/);
   await assert.rejects(persistPilotTurn(db, homeCatalog, 'dono', { ...report, baseTimelineId: 'tl_outro' },
     async () => assert.fail('linha incorreta')), /CONCURRENT_STATE_CONFLICT/);
-  await persistPilotTurn(db, homeCatalog, 'dono', report, async () => 'Teresa escuta com atenção.');
+  await persistPilotTurn(db, homeCatalog, 'dono', report, async (_arrival, _intent, present, _relations, history, action) => {
+    assert.equal(action, report.declaredAction);
+    assert.ok(!present.memories.some(({ memories }) => memories.some(({ fact }) => fact === statement)));
+    assert.ok(!history.some(({ content }) => content.includes(statement)));
+    return 'Teresa escuta com atenção.';
+  });
   await persistPilotTurn(db, homeCatalog, 'dono', report, async () => assert.fail('renarrou'));
   assert.equal((docs.get(statePath) as { relationships?: unknown }).relationships, undefined);
   await persistPilotTurn(db, homeCatalog, 'dono', next('Digo a Teresa: Bom dia.'), async (_arrival, _intent, present) => {

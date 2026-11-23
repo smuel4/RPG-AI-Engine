@@ -1,4 +1,5 @@
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
+import { freixoFamilyKitchen } from '../src/engine/npcIdentity';
 import { formatWorldTimeLabel } from '../src/engine/constants';
 import { advanceWorldTime, processPlayerAction } from '../src/engine/rulesEngine';
 
@@ -28,7 +29,7 @@ export const independentActions = [
   'Samuel pede aos dois que digam como querem organizar o resto da manhã.',
 ];
 
-export const familyKitchen = 'Cozinha da casa da família, Vila de Freixo';
+export const familyKitchen = freixoFamilyKitchen;
 
 export function createContinuityFixture() {
   const state = createEchoArcBundle('validation-continuity-local');

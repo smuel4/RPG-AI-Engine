@@ -2,6 +2,7 @@ import type { Campaign, NpcRecord } from '../types/game';
 
 export const freixoWoodWorkshop = 'Oficina de Madeira · Vila de Freixo';
 export const freixoFamilyYard = 'Quintal da casa da família, Vila de Freixo';
+export const freixoFamilyKitchen = 'Cozinha da casa da família, Vila de Freixo';
 
 interface NpcRoutineWindow {
   location: string;

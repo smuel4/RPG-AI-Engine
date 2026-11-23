@@ -1,7 +1,46 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { reviewEchoArcNarration } from '../scripts/narrativeReview';
-import { nextGroqAttempt } from '../scripts/echoArcRateLimit';
+import { createFreixoGroqBudget, nextGroqAttempt } from '../scripts/echoArcRateLimit';
+
+test('Avaliação Groq respeita Retry-After, teto de espera e orçamento total', async (t) => {
+  const responses = [
+    new Response(null, { status: 429, headers: { 'retry-after': '63' } }),
+    new Response('ok'),
+    new Response(null, { status: 429, headers: { 'retry-after': '90' } }),
+  ];
+  const fetch = t.mock.method(globalThis, 'fetch', async () => responses.shift()!);
+  let now = 1_000;
+  const waits: number[] = [];
+  const budget = createFreixoGroqBudget(3, () => now, async (ms) => { waits.push(ms); now += ms; });
+  const send = async () => {
+    const response = await globalThis.fetch('https://api.groq.com/openai/v1/chat/completions');
+    if (!response.ok) throw new Error('429');
+    return response.text();
+  };
+  assert.equal(await budget.generate('prompt', 1000, send), 'ok');
+  assert.deepEqual(waits, [63_000]);
+  await assert.rejects(budget.generate('prompt', 1000, send), /429/);
+  assert.deepEqual(waits, [63_000, 60_000]);
+  await assert.rejects(budget.generate('prompt', 1000, send), { code: 'GROQ_EVALUATION_CALL_BUDGET' });
+  assert.equal(fetch.mock.callCount(), 3);
+  assert.equal(budget.calls, 3);
+
+  const fresh = createFreixoGroqBudget(1);
+  await assert.rejects(fresh.generate('a'.repeat(16_000), 1000, send), { code: 'GROQ_EVALUATION_TOKEN_BUDGET' });
+  assert.equal(fresh.calls, 0);
+});
+
+test('429 repetido encerra a geração após duas tentativas', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 429 }));
+  let now = 1_000;
+  const budget = createFreixoGroqBudget(6, () => now, async (ms) => { now += ms; });
+  await assert.rejects(budget.generate('prompt', 1000, async () => {
+    await globalThis.fetch('https://api.groq.com/openai/v1/chat/completions');
+    throw new Error('429');
+  }), /429/);
+  assert.equal(fetch.mock.callCount(), 2);
+});
 
 test('Triagem diferencia um gesto contextual de uma possivel acao consequente', () => {
   const flag = 'revisar_acao_com_consequencia';

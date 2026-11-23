@@ -176,7 +176,11 @@ async function startServer() {
             turnPlanPilot.catalog, playerId, turn, async (campaign, sceneIntent, present, npcRelationships, narrative, declaredAction) => {
               const mode = process.env.NARRATOR_MODE;
               if (localFreixo && (!mode || mode === 'fixed')) {
-                if (sceneIntent.startsWith('Mostre a reação')) return 'A fala encontra uma pausa atenta.';
+                if (sceneIntent.startsWith('Mostre a reação') && present.npcs[0]) {
+                  return sceneIntent.includes('Abra espaço para conversar')
+                    ? `${present.npcs[0].name} se volta para Samuel. “Sobre o que quer conversar?”`
+                    : `${present.npcs[0].name} escuta Samuel com atenção.`;
+                }
                 const observed = present.activities.find(({ name }) =>
                   sceneIntent.startsWith('Descreva somente o que pode ser percebido de ' + name + ' neste local.'));
                 if (observed) {

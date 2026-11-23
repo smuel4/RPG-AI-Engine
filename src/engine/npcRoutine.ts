@@ -12,6 +12,13 @@ export interface NpcRoutineState {
   relationships?: readonly CharacterRelationship[];
   completedActivities?: readonly string[];
   openObjects?: readonly string[];
+  bridgeOffer?: {
+    id: string;
+    npcId: string;
+    recipientId: 'player';
+    status: 'pending' | 'accepted' | 'declined';
+    decisionTurnId?: string;
+  };
   holds: { npcId: string; until: WorldTime; reason: 'commitment' | 'exception' | 'choice' }[];
 }
 

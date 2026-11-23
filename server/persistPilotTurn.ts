@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { advanceWorldTime, getActiveTimelineId, processPlayerAction } from '../src/engine/rulesEngine';
 import { advanceNpcRoutines, isNpcOccupied, routineScene, type NpcRoutineState } from '../src/engine/npcRoutine';
 import { MAX_NPC_MEMORY_LENGTH, recordNpcMemories } from '../src/engine/npcMemory';
-import { getNpcIdentity } from '../src/engine/npcIdentity';
+import { freixoFamilyKitchen, getNpcIdentity } from '../src/engine/npcIdentity';
 import { PLAYER_CHARACTER_ID, recordFirstEncounters, recordPersonalDisclosure, relationshipsInScene } from '../src/engine/npcRelationship';
 import { checkTurnRevision, isTurnId, readCommittedTurn, turnDocumentIds, type TurnIdentity } from '../src/engine/turnIdentity';
 import { matchCatalogLabels, planPilotTravel, planPilotWait, resolvePlannedOutcome, type TurnCatalog } from '../src/engine/turnPlanner';
@@ -11,15 +11,31 @@ import { formatWorldClock } from '../src/engine/constants';
 import type { Campaign, GameEvent, InventoryItem, NarrativeEntry, NpcRecord, PilotFocus } from '../src/types/game';
 import { validateNarration } from './narratorProvider';
 import { answerPilotQuestion } from './pilotFactualDialogue';
-import { claimsUnconfirmedPlayerConsequence } from './pilotNarrativeIntegrity';
+import { claimsUnconfirmedPlayerConsequence, narratedObjectTransition } from './pilotNarrativeIntegrity';
 
 export const SERVER_PILOT_ID = 'echo-arc-server-pilot';
 const speechIntent = /^(?:eu\s+)?(?:digo|falo|conto|confidencio)\b/iu;
 const directedSpeech = /^(?:eu\s+)?(digo|falo|conto|confidencio)\s+(?:a|ao|à|para)\s+([\p{L}\p{M}\p{Zs}'’-]+)\s*[:：]\s*([\s\S]+)$/iu;
-const travelIntent = /^(?:eu\s+)?(?:vou|caminho|sigo|quero\s+ir)\b/iu;
+const travelIntent = /^(?:eu\s+)?(?:vou|caminho|sigo|quero\s+(?:ir|explorar)|pretendo\s+ir|exploro)\b/iu;
 const transferIntent = /^(?:eu\s+)?(?:(pego|recolho|largo|deixo)|(?:quero|vou)\s+(pegar|recolher|largar|deixar))\s+(.+?)[.!?]?$/iu;
 const deliveryIntent = /^(?:eu\s+)?(entrego|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|ofereço)\s+(.+?)\s+(?:para|ao|à|a)\s+(.+?)[.!]?$/iu;
 const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+function bridgeAnswer(text: string, addressed = false) {
+  const answer = normalize(text).replace(/[.!]+$/u, '').replace(/^eu /u, '');
+  if (/^aceito (?:a|sua) companhia$/u.test(answer) || (addressed && answer === 'aceito')) return 'accepted' as const;
+  if (/^(?:(?:recuso|nao aceito) (?:a|sua) companhia|prefiro atravessar sozinho)$/u.test(answer) ||
+      (addressed && /^(?:recuso|nao aceito)$/u.test(answer))) return 'declined' as const;
+  if (/^(?:vou pensar|prefiro pensar|respondo depois|deixo a resposta para depois)$/u.test(answer)) return 'deferred' as const;
+}
+function contextualBridgeAnswer(text: string) {
+  const answer = normalize(text).trim().replace(/[.!]+$/u, '');
+  if (/^(?:pode (?:vir comigo|me acompanhar)|quero que voce (?:venha comigo|me acompanhe)|sim,? vamos juntos)$/u.test(answer)) {
+    return 'accepted' as const;
+  }
+  if (/^(?:talvez (?:eu aceite|(?:voce )?possa vir comigo)|e se voce viesse comigo\?|vou pensar melhor|se eu aceitar,? quando vamos\?)$/u.test(answer)) {
+    return 'unclear' as const;
+  }
+}
 function storageIntent(action: string) {
   const store = /^(?:eu )?(?:guardo|coloco|(?:tento|quero|vou) (?:guardar|colocar)) (.+?) (?:dentro do|no) (.+?)[.!]?$/iu.exec(action);
   const match = store ?? /^(?:eu )?(?:retiro|tiro|pego|(?:tento|quero|vou) (?:retirar|tirar|pegar)) (.+?) (?:de dentro do|do) (.+?)[.!]?$/iu.exec(action);
@@ -30,7 +46,7 @@ const dialogueSyntax = (text: string) => text.normalize('NFKC')
 
 function naturalSpeech(action: string, here: readonly NpcRecord[], records: readonly NpcRecord[],
   focus: readonly PilotFocus[]) {
-  const inquiry = /^(?:eu\s+)?(?:quero|gostaria de|vou)\s+(?:conversar|falar)\s+com\s+(.+?)[.!?]?$/iu.exec(action);
+  const inquiry = /^(?:eu\s+)?(?:(?:(?:quero|gostaria de|vou)\s+(?:conversar|falar)|converso|falo)\s+com|abordo)\s+([^,.!?]+?)(?:\s+sobre\s+(.+?))?[.!?]?$/iu.exec(action);
   const indirectGreeting = /^(?:eu\s+)?(?:cumprimento\s+|dou\s+(?:bom dia|boa tarde|boa noite)\s+(?:a|ao|à|para)\s+)([^,.!?]+)[.!?]*$/iu.exec(action);
   const indirectQuestion = /^(?:eu\s+)?(?:pergunto|(?:quero|queria|gostaria de) saber)(?:\s+(?:a|ao|à|para)\s+(.+?))?\s+((?:como|se|onde|quando|por que|qual|quanto|o que|no que|em que|com que|quem)\b.+)$/iu.exec(action);
   const report = /^(?:eu\s+)?(digo|falo|conto|confidencio)\s+(?:a|ao|à|para)\s+(.+?)\s+que\s+(.+)$/iu.exec(action);
@@ -52,10 +68,11 @@ function naturalSpeech(action: string, here: readonly NpcRecord[], records: read
   const candidates = resolveNpc(address, here, records, focus);
   if (!recognized && !candidates.contextual && !candidates.named) return null;
   if (!candidates.npc) throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE', undefined, undefined, candidates.absentNpcName);
-  return { recipient: candidates.npc, indirect: Boolean(indirectGreeting || indirectQuestion || report),
+  return { recipient: candidates.npc, indirect: Boolean(indirectGreeting || indirectQuestion || report || inquiry?.[2]),
     verb: report?.[1] ?? 'digo',
     question: Boolean(indirectQuestion || (!recognized && (directQuestion || vocative))),
-    statement: inquiry ? null : report?.[3] ?? question ?? (recognized || !vocative ? action : vocative[2].trim()) };
+    statement: inquiry ? inquiry[2] ? 'Assunto: ' + inquiry[2] : null
+      : report?.[3] ?? question ?? (recognized || !vocative ? action : vocative[2].trim()) };
 }
 
 function resolveNpc(address: string, here: readonly NpcRecord[], records: readonly NpcRecord[],
@@ -260,8 +277,13 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
   const actions = splitPilotActions(action);
   const objectLocation = (object: typeof catalogObjects[number]) => object.portable
     ? portableState.find(({ id }) => id === object.id)!.location : object.location;
+  const fixedObjects = catalogObjects.filter(({ portable }) => !portable);
+  const openableObjects = catalogObjects.filter(({ openable }) => openable);
   if (objectAnswer !== undefined && actions.length !== 1) throw new PilotTurnError('PILOT_OBJECT_UNREGISTERED');
   const turnSequence = campaign.lastSequence + 3;
+  const establishedPlaces = [campaign.setting,
+    ...narrative.filter(({ authorRole, privateRecipientId }) => authorRole === 'system_seed' && !privateRecipientId)
+      .map(({ content }) => content)];
   // Context comes from committed player actions, with legacy speech recipients as a fallback.
   const recentFocus = narrative.filter(({ authorRole }) => authorRole === 'player_action')
     .sort((a, b) => b.sequence - a.sequence)
@@ -273,10 +295,21 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const commandSyntax = syntax.replace(/[.!]+$/u, '.');
     const waiting = planPilotWait(syntax, campaign.worldTime);
     if (waiting && actions.length > 1) throw new PilotTurnError('PILOT_WAIT_SEQUENCE');
-    const observation = /^(?:eu\s+)?(?:(?:quero|vou)\s+(?:observar|examinar|olhar|inspecionar)|observo|examino|olho|inspeciono)\s+(?:mais\s+de\s+perto\s+)?(.+?)[.!]?$/iu.exec(commandSyntax);
+    const observation = /^(?:eu\s+)?(?:(?:quero|vou)\s+(?:observar|examinar|olhar|inspecionar)|observo|examino|olho|inspeciono|dou uma olhada(?:\s+n[oa]s?)?)\s+(?:mais\s+de\s+perto\s+)?(.+?)[.!]?$/iu.exec(commandSyntax);
+    const search = /^(?:(?:eu )?(?:procuro|quero encontrar)(?: por)?|onde (?:posso )?(?:achar|encontrar)|onde encontro) (.+?)[.!?]?$/iu.exec(syntax);
+    const directions = /^(?:(?:será que )?(?:existe|há|tem) (?:um )?caminho (?:para|até)|como (?:posso chegar|chego) (?:ao|à|até|em)|onde fica) (.+?)\??$/iu.exec(syntax);
     const help = /^(?:eu\s+)?(?:ajudo|(?:quero|vou|tento)\s+ajudar)\s+(.+?)\s+a\s+(\p{L}+)\s+(.+?)[.!]?$/iu.exec(commandSyntax);
     const explicitSpeech = directedSpeech.exec(action) ?? directedSpeech.exec(syntax);
     const here = records.filter((npc) => npc.location === campaign.currentLocation);
+    const offer = runtime?.bridgeOffer;
+    const pendingOffer = offer?.status === 'pending' && offer.recipientId === PLAYER_CHARACTER_ID;
+    const motherAddress = /,\s*m[aã]e(?=[.!?]*$)/iu.exec(syntax);
+    const contextualRecipient = motherAddress
+      ? resolveNpc('mãe', here, records, context).npc?.id
+      : context.find(({ kind }) => kind === 'npc')?.id;
+    const bareBridgeAnswer = bridgeAnswer(syntax) ??
+      (pendingOffer && contextualRecipient === offer.npcId
+        ? contextualBridgeAnswer(motherAddress ? syntax.replace(motherAddress[0], '') : syntax) : undefined);
     const storage = storageIntent(commandSyntax);
     const transferCommand = waiting ? null : transferIntent.exec(commandSyntax);
     const delivery = deliveryIntent.exec(commandSyntax);
@@ -291,17 +324,39 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     if (bareObservation && actions.length === 1 && localObjects.length) {
       throw new PilotTurnError('PILOT_OBJECT_AMBIGUOUS', undefined, undefined, undefined, syntax.replace(/[.!?]$/, ''));
     }
-    const natural = explicitSpeech || observation || help || transferring || organize || waiting || opening
+    const natural = explicitSpeech || bareBridgeAnswer || observation || search || directions || help || transferring || organize || waiting || opening
       ? null : naturalSpeech(syntax, here, records, context);
     if (!explicitSpeech && !natural && speechIntent.test(syntax)) throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE');
-    const speech = Boolean(explicitSpeech || natural);
-    if (!speech && !observation && !help && !transferring && !organize && !waiting && !opening && (!travelIntent.test(syntax) ||
+    const speech = Boolean(explicitSpeech || natural || bareBridgeAnswer);
+    if (!speech && !observation && !search && !directions && !help && !transferring && !organize && !waiting && !opening && (!travelIntent.test(syntax) ||
         /^(?:eu\s+)?vou\s+(?:observar|olhar|examinar|inspecionar|ajudar|mexer|pegar|interagir)\b/iu.test(action))) {
       throw new PilotTurnError('PILOT_ACTION_UNSUPPORTED');
     }
     const targetKey = (value: string) => normalize(value).replace(/^(?:o|a|os|as)\s+/u, '').trim();
     const target = (kind: PilotFocus['kind']) => context.find((focus) => focus.kind === kind)?.id;
     const selectOutcome = () => {
+      if (search || directions) {
+        const query = (search ?? directions)![1].replace(/[.!?]+$/u, '');
+        const route = directions ? planPilotTravel('Vou até ' + query, campaign, catalog, establishedPlaces) : undefined;
+        const result = search ? resolveNpc(query, here, records, context) : undefined;
+        const visible = complete ? result?.npc : undefined;
+        const text = route?.status === 'planned' ? (route.destination === campaign.currentLocation
+          ? 'Samuel já está nesse local.'
+          : `Há um caminho acessível para ${route.destination}. O percurso leva ${route.expectedMinutes} min.`)
+          : route?.status === 'clarification' ? ({
+            'unknown-destination': 'Samuel não reconhece esse destino no mapa disponível.',
+            'uncatalogued-destination': 'Esse local foi mencionado, mas ainda não está no mapa jogável.',
+            'ambiguous-destination': 'Qual dos locais Samuel quer encontrar?',
+          } as Partial<Record<typeof route.reason, string>>)[route.reason] ?? 'O destino é conhecido, mas não há caminho acessível a partir daqui.'
+          : visible ? `${visible.name} está aqui e Samuel pode tentar conversar.`
+          : 'Samuel não consegue identificar essa pessoa aqui nem confirmar onde encontrá-la.';
+        return {
+          plan: { kind: 'observation' as const, focus: query, objectFact: text, authoritative: true },
+          focus: visible ? { kind: 'npc' as const, id: visible.id } : undefined,
+          resolution: { completed: true, elapsedMinutes: 0 },
+          outcome: { location: campaign.currentLocation, elapsedMinutes: 0 },
+        };
+      }
       if (opening) {
         const open = normalize(opening[1]) !== 'fecho';
         const key = targetKey(opening[2]);
@@ -429,10 +484,19 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
           outcome: { location: campaign.currentLocation, elapsedMinutes: 0 }, deliveryRecipient: recipient?.name };
       }
       if (speech) {
-        const [, verb, name, content] = explicitSpeech ?? ['', natural!.verb, natural!.recipient.name, natural!.statement ?? ''];
+        const [, verb, name, content] = explicitSpeech ?? ['', natural?.verb ?? 'digo', '', natural?.statement ?? syntax];
         const explicitRecipient = explicitSpeech && resolveNpc(name, here, records, context);
-        const recipient = natural?.recipient ?? explicitRecipient?.npc;
-        const statement = content.trim();
+        const recipient = natural?.recipient ?? explicitRecipient?.npc ??
+          (bareBridgeAnswer ? here.find(({ id }) => id === offer?.npcId) : undefined);
+        const statement = natural?.statement === null ? '' : content.trim();
+        const answer = bareBridgeAnswer ?? (/^(?:digo|falo)$/iu.test(verb)
+          ? bridgeAnswer(statement, true) ??
+            (pendingOffer && recipient?.id === offer.npcId ? contextualBridgeAnswer(statement) : undefined)
+          : undefined);
+        const addressedOffer = bareBridgeAnswer || (offer && offer.npcId === recipient?.id);
+        if (answer && addressedOffer &&
+            (!complete || !offer || offer.status !== 'pending' || offer.recipientId !== PLAYER_CHARACTER_ID ||
+              !recipient || recipient.id !== offer.npcId)) throw new PilotTurnError('PILOT_BRIDGE_OFFER_UNAVAILABLE');
         const personal = verb.toLowerCase() === 'confidencio' &&
           !/^(?:olá|oi|bom dia|boa tarde|boa noite|tudo bem|obrigad[oa]|até logo)[\s.!?,]*$/iu.test(statement);
         const remember = personal || verb.toLowerCase() === 'conto';
@@ -445,10 +509,19 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
         if (isNpcOccupied(runtime, recipient.id, campaign.worldTime)) {
           throw new PilotTurnError('PILOT_FACTUAL_NPC_OCCUPIED');
         }
+        const offerCompany = !offer && natural?.statement === null && campaign.currentLocation === freixoFamilyKitchen &&
+          getNpcIdentity(campaign, recipient)?.key === 'echo-arc:teresa' &&
+          runtime?.memories?.some(({ npcId, timelineId, sequence, origin, fact }) =>
+            npcId === recipient.id && timelineId === turn.baseTimelineId && sequence <= campaign.lastSequence &&
+            origin.kind === 'reported' && origin.reporterId === PLAYER_CHARACTER_ID &&
+            /^(?:tenho|sinto) (?:medo|receio) de (?:atravessar|cruzar) a ponte sozinho[.!]*$/u.test(normalize(fact)));
+        const socialPlan: { bridgeOffer?: 'offered' | ReturnType<typeof bridgeAnswer> | ReturnType<typeof contextualBridgeAnswer> } = offerCompany
+          ? { bridgeOffer: 'offered' } : answer && addressedOffer ? { bridgeOffer: answer } : {};
         return {
           focus: { kind: 'npc', id: recipient.id } satisfies PilotFocus,
           recipientName: recipient.name,
           plan: { kind: 'speech' as const, recipientId: recipient.id, statement, remember, personal,
+            ...socialPlan,
             ...(factualAnswer ? { factualAnswer } : {}) },
           resolution: { completed: true, elapsedMinutes: 0 },
           outcome: { location: campaign.currentLocation, elapsedMinutes: 0 },
@@ -461,7 +534,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
           ? commandSyntax.slice(0, commandSyntax.lastIndexOf(observation[1])).trim() : undefined;
         const npcKey = /^que (.+?) (?:esta fazendo|faz)$/u.exec(focusKey)?.[1];
         const npc = resolveNpc(npcKey ?? focusKey, here, records, context);
-        const surroundings = objectAnswer === undefined && /^(?:ao (?:meu )?redor|em volta|ambiente|local|aqui)$/u.test(focusKey);
+        const surroundings = objectAnswer === undefined && /^(?:ao (?:meu )?redor|em volta|arredores|ambiente|local|aqui)$/u.test(focusKey);
         const placeReference = /^(?:la|ali|(?:esse|este|aquele) (?:lugar|local|ambiente))$/u.test(focusKey);
         const local = objectAnswer === undefined && current && (placeReference ? target('place') === current.id
           : [current.id, ...current.aliases].some((name) => targetKey(name) === focusKey));
@@ -540,7 +613,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
           outcome: { location: campaign.currentLocation, elapsedMinutes: activity.minutes },
         };
       }
-      const plan = planPilotTravel(syntax, campaign, catalog);
+      const plan = planPilotTravel(syntax, campaign, catalog, establishedPlaces);
       if (plan.status !== 'planned' || plan.intent.kind !== 'travel' || plan.expectedMinutes === null ||
           plan.origin === plan.destination) throw new PilotTurnError('PILOT_TRAVEL_UNAVAILABLE',
         plan.status === 'clarification' ? plan.reason : undefined);
@@ -608,8 +681,21 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
           fact: participant ? 'Organizou a bancada com Samuel.' : 'Viu Samuel organizar a bancada.' });
       }
     }
-    const state = sharedMemories.length
-      ? { ...worldState, memories: recordNpcMemories(worldState.memories ?? [], sharedMemories) } : worldState;
+    const speechPlan = 'kind' in plan && plan.kind === 'speech' ? plan : undefined;
+    const bridgeAction = speechPlan?.bridgeOffer;
+    const bridgeOffer: NpcRoutineState['bridgeOffer'] = speechPlan && bridgeAction === 'offered'
+      ? { id: turn.turnId, npcId: speechPlan.recipientId, recipientId: PLAYER_CHARACTER_ID, status: 'pending' }
+      : (bridgeAction === 'accepted' || bridgeAction === 'declined') && offer
+        ? { ...offer, status: bridgeAction, decisionTurnId: turn.turnId } : undefined;
+    if (bridgeOffer?.decisionTurnId) {
+      sharedMemories.push({ ...origin, npcId: bridgeOffer.npcId, occurredAt: arrival.worldTime,
+        origin: { kind: 'consequence', effect: 'proposal', subjectId: bridgeOffer.id },
+        fact: bridgeOffer.status === 'accepted' ? 'Samuel aceitou a oferta de companhia para atravessar a ponte.'
+          : 'Samuel recusou a oferta de companhia para atravessar a ponte.' });
+    }
+    const state = sharedMemories.length || bridgeOffer
+      ? { ...worldState, ...(bridgeOffer ? { bridgeOffer } : {}),
+        memories: recordNpcMemories(worldState.memories ?? [], sharedMemories) } : worldState;
     const visibleNewcomers = encounters.filter((relation) => relation.firstEncounter?.turnId === turn.turnId && !relationships.includes(relation))
       .map((relation) => present.npcs.find((npc) => npc.id === relation.from)!.name);
     const destinations = catalog.routes.filter((route) => route.from === arrival.currentLocation && !route.blocked)
@@ -648,6 +734,15 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     : last.transfer?.kind === 'retrieve' ? `Samuel retirou o item “${transferred.object.name}” do ${last.transfer.containerName}.`
     : (last.transfer?.kind === 'pickup' ? 'Samuel recolheu o item “' : 'Samuel deixou no chão o item “') + transferred.object.name + '”.');
   const narrateStep = async (step: typeof last, declared: string) => {
+    if ('kind' in step.plan && step.plan.kind === 'speech' && step.plan.bridgeOffer) {
+      return {
+        offered: 'Teresa faz uma pausa. “Se quiser, posso atravessar a ponte com você. Pode aceitar, recusar ou me responder depois.”',
+        accepted: 'Teresa assente. “Combinado, filho. Quando quiser ir, me avise.”',
+        declined: 'Teresa assente. “Tudo bem, filho. Respeito sua escolha.”',
+        deferred: 'Teresa repousa as mãos. “Claro, filho. Pense com calma.”',
+        unclear: 'Teresa fala com calma. “A oferta continua em aberto, filho. Se já tiver decidido, pode me dizer.”',
+      }[step.plan.bridgeOffer];
+    }
     if ('kind' in step.plan && step.plan.kind === 'speech' && step.plan.factualAnswer) return step.plan.factualAnswer;
     if ('kind' in step.plan && step.plan.kind === 'wait') {
       const duration = step.plan.elapsedMinutes === 1 ? '1 minuto' : step.plan.elapsedMinutes + ' minutos';
@@ -661,20 +756,34 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const { outcome, activity, observationPlan, arrival, state, speech, recipientName, natural, present,
       visibleNewcomers, destinations } = step;
     const recipientId = 'kind' in step.plan && step.plan.kind === 'speech' ? step.plan.recipientId : undefined;
+    const knownOffer = recipientId && state.bridgeOffer?.npcId === recipientId ? state.bridgeOffer : undefined;
+    const offerContext = knownOffer ? ' A oferta de Teresa para acompanhar Samuel na ponte ' + {
+      pending: 'aguarda resposta de Samuel.',
+      accepted: 'foi aceita por Samuel, que ainda escolhe quando ou se fará a travessia.',
+      declined: 'foi recusada por Samuel.',
+    }[knownOffer.status] : '';
+    // A fala deste turno chega em declaredAction. Aqui só entram lembranças anteriores.
     const dialogueScene = recipientId ? routineScene(arrival,
-      present.npcs.filter(({ id }) => id === recipientId), state, turnSequence) : undefined;
+      present.npcs.filter(({ id }) => id === recipientId), state, turnSequence - 1) : undefined;
     const publicKnowledge = present.knowledge.filter(({ source }) => source === 'public');
     const contextScene = dialogueScene
       ? { ...dialogueScene, knowledge: [...dialogueScene.knowledge, ...publicKnowledge] }
       : { ...present, knowledge: publicKnowledge, memories: [] };
     const destinationContext = ` Contexto operacional de rotas: ${JSON.stringify(destinations)}. Escreva somente prosa narrativa, sem menus, listas ou cabeçalhos técnicos. Locais podem ser citados naturalmente. Só indique como caminho confirmado uma rota deste contexto; lugares fora dele podem aparecer como referências ainda não verificadas.`;
+    const spatialContext = fixedObjects.length
+      ? ' Objetos fixos confirmados pelo motor: ' + JSON.stringify(fixedObjects.map((object) => ({
+        name: object.name, location: object.location,
+        ...(object.openable ? { state: state.openObjects?.includes(object.id) ? 'aberto' : 'fechado' } : {}),
+      }))) + '. Este estado prevalece sobre a prosa do histórico. Só descreva objetos fixos como presentes em seu local confirmado.'
+      : '';
     const scene = await narrate(arrival,
-      (speech ? `Mostre a reação de ${recipientName} em até quatro frases. ${natural?.statement === null ? 'Abra espaço para conversar; Samuel ainda não disse nada.' : 'Reaja à fala declarada; só o destinatário ouviu a informação. Trate-a como relato, sem confirmar fatos, compromissos ou objetivos.'} ${natural?.indirect ? 'O jogador declarou a interação em discurso indireto; não invente uma fala literal de Samuel.' : ''} Mantenha a posição e os objetos da última cena ou mostre como mudaram. Não repita propostas sem motivo nem atribua novas falas ou ações a Samuel.`
+      (speech ? `Mostre a reação de ${recipientName} em até quatro frases. ${natural?.statement === null ? 'Abra espaço para conversar; Samuel ainda não disse nada.' : 'Responda à fala atual conforme o conhecimento do destinatário. Use lembranças anteriores só quando apoiadas pelo contexto. Quando perguntarem por uma lembrança disponível, retome seu sentido ou deixe claro por que o NPC a reserva.'} ${natural?.indirect ? 'O jogador declarou a interação em discurso indireto; não invente uma fala literal de Samuel.' : ''} Preserve a posição e os objetos confirmados. Deixe propostas em aberto, sem atribuir novas falas ou ações a Samuel.`
         : observationPlan ? `Descreva somente o que pode ser percebido de ${observationPlan.focus} neste local. Use detalhes sensoriais passageiros; não revele informações privadas, invente ações, posse ou mudanças permanentes. Nenhum tempo relevante se passou.`
           : activity ? `A tentativa de ajudar ${activity.participant} foi concluída em ${outcome.elapsedMinutes} minutos. Resultado confirmado: ${activity.result} Descreva apenas um detalhe visível desse resultado, sem criar recompensas, mudanças de relacionamento, falas ou ações novas.`
             : `Descreva o que é visível em ${outcome.location}, em até três frases. Samuel já chegou após ${outcome.elapsedMinutes} minutos. Pode mostrar atividades locais observáveis. Use apenas traços físicos já estabelecidos para personagens nomeados. Não atribua falas ou ações a Samuel e não narre deslocamentos adicionais.`)
         + (observationPlan?.objectFact ? ' O motor já apresenta estes fatos ao jogador: ' + observationPlan.objectFact +
           ' Complemente sem repetir ou contradizer esses fatos e sem atribuir novas propriedades ao objeto.' : '')
+        + offerContext + spatialContext + (openableObjects.length ? ' Aberturas e fechamentos de objetos rastreados exigem efeito confirmado pelo motor.' : '')
         + destinationContext,
       contextScene,
       dialogueScene ? relationshipsInScene(dialogueScene.npcs, turn.baseTimelineId, state.relationships ?? []) : [],
@@ -683,8 +792,38 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const prose = speech ? description
       : observationPlan ? validateObservationProse(description)
       : arrivalProse(description, outcome.location, catalog);
-    if (claimsUnconfirmedPlayerConsequence(prose)) {
-      console.warn('[freixo] Prosa contida', { turnId: turn.turnId, reason: 'unconfirmed-player-consequence' });
+    const spatialConflict = !speech && prose.split(/[.!?\n]+/u).some((sentence) => {
+      const words = ' ' + (normalize(sentence).match(/\p{L}+/gu) ?? []).join(' ') + ' ';
+      const matches = (label: string) => {
+        const name = normalize(label).replace(/[^\p{L}]+/gu, ' ').trim();
+        return name.includes(' ') ? words.includes(' ' + name + ' ')
+          : ['o', 'a', 'os', 'as', 'este', 'esta', 'esse', 'essa', 'aquele', 'aquela']
+            .some((article) => words.includes(' ' + article + ' ' + name + ' '));
+      };
+      return fixedObjects.some((object) => {
+        if (object.location === arrival.currentLocation || ![object.name, ...object.aliases].some(matches)) return false;
+        if (fixedObjects.some((local) => local.location === arrival.currentLocation &&
+          [local.name, ...local.aliases].some((label) => [object.name, ...object.aliases].includes(label) && matches(label)))) {
+          return false;
+        }
+        const home = catalog.places.find(({ id }) => id === object.location);
+        const here = catalog.places.find(({ id }) => id === arrival.currentLocation);
+        const refersTo = (place: typeof home) => place && [place.id, ...place.aliases].some((label) => {
+          const name = normalize(label).replace(/[^\p{L}]+/gu, ' ').trim();
+          return ['no', 'na', 'nos', 'nas', 'em'].some((preposition) => words.includes(' ' + preposition + ' ' + name + ' '));
+        });
+        return !refersTo(home) || Boolean(refersTo(here));
+      });
+    });
+    // Confirmed open/close effects return the engine result above, before narration.
+    const objectTransition = narratedObjectTransition(prose, openableObjects);
+    if (objectTransition === 'ambiguous') {
+      console.warn('[freixo] Revisar prosa', { turnId: turn.turnId, reason: 'ambiguous-object-transition' });
+    }
+    if (spatialConflict || objectTransition === 'unconfirmed' || claimsUnconfirmedPlayerConsequence(prose)) {
+      console.warn('[freixo] Prosa contida', { turnId: turn.turnId,
+        reason: spatialConflict ? 'fixed-object-outside-scene'
+          : objectTransition === 'unconfirmed' ? 'unconfirmed-object-transition' : 'unconfirmed-player-consequence' });
       // Preserve the confirmed resolution. Only the provider's contribution is replaced.
       return [activity?.result, observationPlan?.objectFact,
         speech ? 'A conversa faz uma pausa.' : 'Nada mais se destaca neste momento.'].filter(Boolean).join(' ');
@@ -750,7 +889,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     }
     if (state !== runtime && current.routineRef &&
         (state.activities.length || state.memories?.length || state.relationships?.length ||
-          state.completedActivities?.length || state.openObjects !== undefined)) {
+          state.completedActivities?.length || state.openObjects !== undefined || state.bridgeOffer)) {
       tx.set(current.routineRef, state);
     }
     tx.create(receiptRef, { ownerId, turn, plan, resolution, outcome, playerEntryId: ids.player,

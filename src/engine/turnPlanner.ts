@@ -30,7 +30,7 @@ export interface TurnPlan {
 export type TurnPlanningResult = TurnPlan | {
   status: 'clarification';
   origin: string;
-  reason: 'ambiguous-destination' | 'unknown-destination' | 'unknown-route' | 'unmet-conditions';
+  reason: 'ambiguous-destination' | 'unknown-destination' | 'uncatalogued-destination' | 'unknown-route' | 'unmet-conditions';
 };
 
 function words(value: string): string[] {
@@ -149,16 +149,22 @@ function findRoute(origin: string, destination: string, catalog: TurnCatalog,
   return best;
 }
 
-export function planPilotTravel(action: string, state: { currentLocation: string }, catalog: TurnCatalog): TurnPlanningResult {
+export function planPilotTravel(action: string, state: { currentLocation: string }, catalog: TurnCatalog,
+  establishedPlaces: readonly string[] = []): TurnPlanningResult {
   const source = action.normalize('NFD').replace(/\p{M}/gu, '').trim().replace(/\s+/gu, ' ').toLowerCase();
-  const command = /^(?:eu )?(?:vou(?: dar uma volta)?|caminho|sigo|quero ir) (?:(?:da|do|de) ([\p{L}\p{N} -]+?) para |(?:ate|ao|a|para) )([\p{L}\p{N} -]+?)[.!]*$/u.exec(source);
-  const refuse = (reason: 'unknown-destination' | 'ambiguous-destination' | 'unknown-route'): TurnPlanningResult =>
+  const command = /^(?:eu )?(?:(?:vou(?: dar uma volta)?|caminho|sigo|quero ir|pretendo ir) (?:(?:da|do|de) ([\p{L}\p{N} -]+?) para |(?:ate|ao|a|para) )|(?:quero |vou )?explorar |exploro )([\p{L}\p{N} -]+?)[.!]*$/u.exec(source);
+  const refuse = (reason: 'unknown-destination' | 'uncatalogued-destination' | 'ambiguous-destination' | 'unknown-route'): TurnPlanningResult =>
     ({ status: 'clarification', origin: state.currentLocation, reason });
   if (/\bou\b/u.test(source)) return refuse('ambiguous-destination');
   if (!command || /\b(?:talvez|se|nao|depois|mas)\b/u.test(source)) return refuse('unknown-destination');
   const labels = ({ id, aliases }: TurnCatalog['places'][number]) => [id, ...aliases];
   const destinations = matchCatalogLabels(command[2], catalog.places, labels, true);
-  if (destinations.length !== 1) return refuse(destinations.length ? 'ambiguous-destination' : 'unknown-destination');
+  if (destinations.length > 1) return refuse('ambiguous-destination');
+  if (!destinations.length) {
+    const target = labelKey(command[2]);
+    return refuse(target && establishedPlaces.some((text) => (' ' + words(text).join(' ') + ' ').includes(' ' + target + ' '))
+      ? 'uncatalogued-destination' : 'unknown-destination');
+  }
   if (command[1]) {
     const origins = matchCatalogLabels(command[1], catalog.places, labels);
     if (origins.length !== 1 || origins[0].id !== state.currentLocation) return refuse('unknown-route');

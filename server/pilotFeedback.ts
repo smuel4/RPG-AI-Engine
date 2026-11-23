@@ -2,6 +2,7 @@ import type { PilotTurnError } from './persistPilotTurn';
 
 const gameplayMessages: ReadonlyMap<string, string> = new Map([
   ['PILOT_SPEECH_UNAVAILABLE', 'Com quem Samuel quer conversar? Indique uma pessoa presente.'],
+  ['PILOT_BRIDGE_OFFER_UNAVAILABLE', 'Samuel só pode responder a uma oferta pendente com quem a fez presente.'],
   ['PILOT_FACTUAL_NPC_OCCUPIED', 'Essa pessoa está ocupada agora. Samuel pode perguntar em outro momento.'],
   ['PILOT_TRAVEL_UNAVAILABLE', 'Indique um destino conhecido que Samuel possa alcançar daqui.'],
   ['PILOT_ACTION_UNSUPPORTED', 'Descreva um deslocamento, uma conversa, uma observação ou uma ajuda disponível.'],
@@ -55,6 +56,12 @@ export function describePilotFeedback(error: PilotTurnError, clarification: bool
     message = (code === 'PILOT_OBJECT_UNREGISTERED' ? message + ' ' : '') + 'Qual objeto você deseja examinar?';
   } else if (code === 'PILOT_TRAVEL_UNAVAILABLE' && error.reason === 'ambiguous-destination') {
     message = 'Para onde Samuel quer ir? Indique um único destino.';
+  } else if (code === 'PILOT_TRAVEL_UNAVAILABLE' && error.reason === 'uncatalogued-destination') {
+    message = 'Esse local foi mencionado na história, mas ainda não está no mapa jogável.';
+  } else if (code === 'PILOT_TRAVEL_UNAVAILABLE' && error.reason === 'unknown-destination') {
+    message = 'Samuel não reconhece esse destino no mapa disponível. Indique um local conhecido.';
+  } else if (code === 'PILOT_TRAVEL_UNAVAILABLE' && ['unknown-route', 'unmet-conditions'].includes(error.reason ?? '')) {
+    message = 'O destino é conhecido, mas não há caminho acessível a partir daqui.';
   } else if (code === 'PILOT_OBSERVATION_UNAVAILABLE' && absentNpcName) {
     message = `Samuel não consegue observar ${absentNpcName} daqui. Essa pessoa não está presente neste local.`;
   } else if (code === 'PILOT_SPEECH_UNAVAILABLE' && absentNpcName) {
