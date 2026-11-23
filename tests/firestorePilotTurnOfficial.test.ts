@@ -92,7 +92,7 @@ test('piloto grava chegada uma vez e o navegador não escreve estado nem recibos
     await persistPilotTurn(db, catalog, 'dono', { ...turn, turnId: crypto.randomUUID(),
       expectedRevision: after.revision, declaredAction: 'Vou até a casa' }, async (_arrival, _intent, present) => {
       assert.deepEqual(present.npcs.map(({ name }) => name), ['Teresa']);
-      assert.deepEqual(present.memories, [{ name: 'Teresa', memories: [{ source: 'observed', fact: 'Viu Henrique sair.' }] }]);
+      assert.deepEqual(present.memories, []);
       return 'Teresa organiza a mesa.';
     });
     const revision = (await ref.get()).data()!.revision;
@@ -124,7 +124,7 @@ test('piloto grava chegada uma vez e o navegador não escreve estado nem recibos
     const wellCatalog = { places: [...catalog.places, { id: villageWell, aliases: ['poço'] }],
       routes: [...catalog.routes, { from: home, to: villageWell, minutes: 6 }] };
     await persistPilotTurn(db, wellCatalog, 'dono', visit, async (_arrival, _intent, _present, relationships) => {
-      assert.equal(relationships.find(({ character }) => character === lira.name)?.familiarity, 'inicial');
+      assert.deepEqual(relationships, []);
       return 'Lira segura a corda do balde.';
     });
     await persistPilotTurn(db, wellCatalog, 'dono', visit, async () => assert.fail('repetiu encontro'));

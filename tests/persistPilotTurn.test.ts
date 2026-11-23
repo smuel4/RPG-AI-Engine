@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Firestore } from 'firebase-admin/firestore';
+import { memoryFirestore } from '../scripts/freixoEvaluationStore';
 import { persistPilotTurn, PilotTurnError, SERVER_PILOT_ID } from '../server/persistPilotTurn';
 import { issuePilotClarification, readPilotClarification } from '../server/pilotClarification';
 import { describePilotFeedback } from '../server/pilotFeedback';
@@ -48,6 +48,11 @@ test('sessão de Freixo preserva consequências e conhecimento após 40 turnos a
             sceneKnowledge: present.knowledge, npcActivities: present.activities,
             npcMemories: present.memories, npcRelationships: relationships });
           const prompt = buildNarratorPrompt({ context, sceneIntent, declaredAction: action });
+          if (action === 'Vou à cozinha.' || action === 'Vou ao poço.' || action === 'Vou ao quintal.') {
+            assert.ok(!prompt.includes(continuitySecret), 'confidência vazou para uma chegada');
+            assert.equal(context.currentState.privateNpcMemories, undefined);
+            assert.equal(context.currentState.privateNpcRelationships, undefined);
+          }
           if (action === 'Digo a Teresa: Obrigado.') {
             assert.ok(prompt.includes(continuitySecret), 'Teresa perdeu acesso à confidência');
             assert.match(prompt, /Entreguei o bloco a Henrique/);
@@ -82,39 +87,6 @@ test('sessão de Freixo preserva consequências e conhecimento após 40 turnos a
     }
   }
 });
-
-function memoryFirestore(docs: Map<string, object>) {
-  const collection = (parent: string) => ({
-    doc: (id: string) => ({ path: parent + '/' + id, collection: (name: string) => collection(parent + '/' + id + '/' + name) }),
-    where: () => ({ limit: () => ({ parent }) }),
-    orderBy: () => ({ limit: () => ({ parent }) }),
-  });
-  return {
-    collection,
-    async runTransaction<T>(fn: (tx: object) => Promise<T>) {
-      const writes = new Map<string, object | null>();
-      const result = await fn({
-        getAll: async (...refs: { path: string }[]) => refs.map(({ path }) =>
-          ({ exists: docs.has(path), data: () => docs.get(path) })),
-        get: async (ref: { path: string } | { parent: string }) => {
-          if ('path' in ref) return { data: () => docs.get(ref.path) };
-          const records = [...docs].filter(([path]) => path.startsWith(ref.parent + '/'));
-          return { size: records.length, docs: records.map(([path, value]) =>
-            ({ id: path.split('/').at(-1), data: () => value })) };
-        },
-        set: ({ path }: { path: string }, data: object) => writes.set(path, data),
-        update: ({ path }: { path: string }, data: object) => writes.set(path, { ...docs.get(path), ...data }),
-        create: ({ path }: { path: string }, data: object) => writes.set(path, data),
-        delete: ({ path }: { path: string }) => writes.set(path, null),
-      });
-      for (const [key, value] of writes) {
-        if (value) docs.set(key, value);
-        else docs.delete(key);
-      }
-      return result;
-    },
-  } as unknown as Firestore;
-}
 
 const recordedGroqArrival = "O poço da Vila de Freixo surge como um círculo de pedra escura ladeado por trepadeiras de flores silvestres, onde a água reflete o céu matutino ainda levemente rosado. Ao redor, alguns aldeões carregam baldes de madeira; um velho pescador bate o pé na borda, enquanto duas crianças correm entre as sombras das casas, lançando risos que se perdem no canto do vento. Lira, de cabelos trançados e avental manchado de terra, está inclinada sobre o balde, enchendo‑o com cuidado antes de virar-se para conversar com quem se aproximar.  \n\n**Destinos disponíveis agora:**  \n- Quintal da casa da família, Vila de Freixo  \n- Cozinha da casa da família, Vila de Freixo";
 
@@ -816,6 +788,26 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
   try {
     docs.set(npcPath + henrique.id, { ...henrique, campaignId: SERVER_PILOT_ID, location: home });
     await persistPilotTurn(db, homeCatalog, 'dono', next('Conto a Henrique: Amanhã talvez chova.'), async () => 'Henrique escuta.');
+    await persistPilotTurn(db, homeCatalog, 'dono', next('Vou até a praça'), async () => 'Na praça, o sino toca.');
+    const routineBeforeArrival = structuredClone(docs.get(statePath));
+    const arrival = next('Vou até a casa');
+    const arrived = await persistPilotTurn(db, homeCatalog, 'dono', arrival, async (campaign, intent, scene, relations, history, action) => {
+      const context = buildNarratorContext({ campaign, inventory: [], npcs: scene.npcs, narrative: history,
+        sceneKnowledge: scene.knowledge, npcMemories: scene.memories, npcActivities: scene.activities,
+        npcRelationships: relations });
+      const prompt = buildNarratorPrompt({ context, sceneIntent: intent, declaredAction: action });
+      assert.deepEqual([...context.currentState.knownPresentNpcs].sort(), ['Henrique', 'Teresa']);
+      assert.doesNotMatch(prompt, /Tenho medo de sair de casa|Talvez eu viaje|Amanhã talvez chova|Teresa escuta|Henrique escuta|privateNpcMemories|privateNpcRelationships/u);
+      assert.match(prompt, /Contexto operacional de rotas/);
+      assert.match(prompt, /Praça/);
+      assert.match(prompt, /o sino toca/);
+      return 'A luz entra pela janela.';
+    });
+    assert.deepEqual(docs.get(statePath), routineBeforeArrival);
+    const afterArrival = [...docs];
+    assert.equal((await persistPilotTurn(db, homeCatalog, 'dono', arrival, async () => assert.fail('renarrou'))).narration,
+      arrived.narration);
+    assert.deepEqual([...docs], afterArrival);
     await persistPilotTurn(db, homeCatalog, 'dono', next('Digo a Henrique: Bom dia.'), async (campaign, intent, scene, relations, history, action) => {
       assert.deepEqual(scene.npcs.map(({ id }) => id), [henrique.id]);
       const context = buildNarratorContext({ campaign, inventory: [], npcs: scene.npcs, narrative: history,
@@ -881,7 +873,7 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
   const encounter = async (_arrival: unknown, _intent: unknown, present: { npcs: { name: string }[] },
     relationships: { character: string; familiarity: string }[]) => {
     assert.deepEqual(present.npcs.map(({ name }) => name), ['Lira']);
-    assert.deepEqual(relationships, [{ character: 'Lira', toward: 'protagonista', bond: 'unspecified', familiarity: 'inicial' }]);
+    assert.deepEqual(relationships, []);
     return 'Lira ajeita o balde.';
   };
   const arrival = await persistPilotTurn(db, wellCatalog, 'dono', visit, async (campaign, intent, present, relationships) => {

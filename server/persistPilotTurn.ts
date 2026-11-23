@@ -663,9 +663,10 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const recipientId = 'kind' in step.plan && step.plan.kind === 'speech' ? step.plan.recipientId : undefined;
     const dialogueScene = recipientId ? routineScene(arrival,
       present.npcs.filter(({ id }) => id === recipientId), state, turnSequence) : undefined;
-    const contextScene = dialogueScene ? { ...dialogueScene,
-      knowledge: [...dialogueScene.knowledge, ...present.knowledge.filter(({ source }) => source === 'public')] }
-      : observationPlan || activity ? { ...present, knowledge: [], memories: [] } : present;
+    const publicKnowledge = present.knowledge.filter(({ source }) => source === 'public');
+    const contextScene = dialogueScene
+      ? { ...dialogueScene, knowledge: [...dialogueScene.knowledge, ...publicKnowledge] }
+      : { ...present, knowledge: publicKnowledge, memories: [] };
     const destinationContext = ` Contexto operacional de rotas: ${JSON.stringify(destinations)}. Escreva somente prosa narrativa, sem menus, listas ou cabeçalhos técnicos. Locais podem ser citados naturalmente. Só indique como caminho confirmado uma rota deste contexto; lugares fora dele podem aparecer como referências ainda não verificadas.`;
     const scene = await narrate(arrival,
       (speech ? `Mostre a reação de ${recipientName} em até quatro frases. ${natural?.statement === null ? 'Abra espaço para conversar; Samuel ainda não disse nada.' : 'Reaja à fala declarada; só o destinatário ouviu a informação. Trate-a como relato, sem confirmar fatos, compromissos ou objetivos.'} ${natural?.indirect ? 'O jogador declarou a interação em discurso indireto; não invente uma fala literal de Samuel.' : ''} Mantenha a posição e os objetos da última cena ou mostre como mudaram. Não repita propostas sem motivo nem atribua novas falas ou ações a Samuel.`
@@ -676,7 +677,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
           ' Complemente sem repetir ou contradizer esses fatos e sem atribuir novas propriedades ao objeto.' : '')
         + destinationContext,
       contextScene,
-      observationPlan || activity ? [] : relationshipsInScene(contextScene.npcs, turn.baseTimelineId, state.relationships ?? []),
+      dialogueScene ? relationshipsInScene(dialogueScene.npcs, turn.baseTimelineId, state.relationships ?? []) : [],
       visibleHistory(narrative, recipientId), declared);
     const description = removeRouteMenu(validateNarration(scene, 'groq'), destinations);
     const prose = speech ? description
