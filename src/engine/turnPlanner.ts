@@ -169,11 +169,32 @@ export function planPilotTravel(action: string, state: { currentLocation: string
 
 export const WAIT_MAX_MINUTES = 60;
 
+const durationUnits = ['zero', 'um', 'dois', 'tres', 'quatro', 'cinco', 'seis', 'sete', 'oito', 'nove'];
+const durationTeens = ['dez', 'onze', 'doze', 'treze', 'quatorze', 'quinze', 'dezesseis', 'dezessete', 'dezoito', 'dezenove'];
+const durationTens = ['vinte', 'trinta', 'quarenta', 'cinquenta', 'sessenta', 'setenta', 'oitenta', 'noventa'];
+
+function durationNumber(text: string) {
+  if (/^[+-]?\d+$/u.test(text)) return Number(text);
+  if (text === 'uma') return 1;
+  if (text === 'duas') return 2;
+  if (text === 'catorze') return 14;
+  const unit = durationUnits.indexOf(text);
+  if (unit >= 0) return unit;
+  const teen = durationTeens.indexOf(text);
+  if (teen >= 0) return 10 + teen;
+  const [tens, units, extra] = text.split(' e ');
+  if (extra !== undefined) return;
+  const tensIndex = durationTens.indexOf(tens);
+  const remainder = units === undefined ? 0 : durationUnits.indexOf(units);
+  if (tensIndex >= 0 && (units === undefined || remainder > 0)) return (tensIndex + 2) * 10 + remainder;
+}
+
 export function planPilotWait(action: string, time: WorldTime) {
   const text = action.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trim().replace(/\s+/gu, ' ');
   const command = /^(?:eu )?(?:espero|aguardo|fico aqui esperando)(?:\s+|[.?!]*$)/u.exec(text);
-  if (!command) return;
-  const period = text.slice(command[0].length).replace(/[.!]+$/u, '').trim();
+  const lettingTimePass = /^(?:eu )?deixo (.+ (?:minutos?|min|horas?)) passar(?:em)?[.!]*$/u.exec(text);
+  if (!command && !lettingTimePass) return;
+  const period = lettingTimePass?.[1] ?? text.slice(command?.[0].length).replace(/[.!]+$/u, '').trim();
   const clock = /^ate (?:as )?(\d{1,2})(?:h(\d{2})?|:(\d{2}))$/u.exec(period);
   const current = time.hour * 60 + time.minute;
   let minutes: number;
@@ -184,10 +205,10 @@ export function planPilotWait(action: string, time: WorldTime) {
     minutes = hour * 60 + minute - current;
     if (minutes <= 0) return { status: 'refused', reason: 'past' } as const;
   } else {
-    const duration = /^([+-]?\d+) (minutos?|min|horas?)$/u.exec(period);
+    const duration = /^(.+) (minutos?|min|horas?)$/u.exec(period);
+    const amount = duration && durationNumber(duration[1]);
     if (period === 'meia hora') minutes = 30;
-    else if (period === 'uma hora') minutes = 60;
-    else if (duration) minutes = Number(duration[1]) * (duration[2].startsWith('hora') ? 60 : 1);
+    else if (duration && typeof amount === 'number') minutes = amount * (duration[2].startsWith('hora') ? 60 : 1);
     else return { status: 'refused', reason: period.startsWith('ate ') ? 'invalid' : 'unspecified' } as const;
   }
   if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > WAIT_MAX_MINUTES) {

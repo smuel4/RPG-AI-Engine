@@ -164,7 +164,7 @@ function splitPilotActions(action: string): string[] {
   while (true) {
     // Preserve the literal contents of a colon-delimited utterance.
     const separator = directedSpeech.test(dialogueSyntax(remaining)) ? null
-      : /\s*;\s*|\s*,?\s+\b(?:e\s+depois|depois|em seguida)\s+|\s+e\s+(?=(?:eu\s+)?(?:vou|caminho|sigo|olho|observo|examino|inspeciono|organizo|arrumo|abro|fecho|espero|aguardo|fico\s+aqui\s+esperando|ajudo|quero|pergunto|digo|falo|conto|confidencio|cumprimento|guardo|coloco|retiro|tiro|tento|pego|recolho|largo|deixo|entrego|ofereço|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|se)\b)/iu.exec(remaining);
+      : /\s*;\s*|\s*,?\s+\b(?:e\s+depois|depois|em seguida)\s+|\s+e\s+(?=(?:eu\s+)?(?:vou|caminho|sigo|olho|observo|examino|inspeciono|organizo|arrumo|abro|escancaro|fecho|espero|aguardo|fico\s+aqui\s+esperando|ajudo|quero|pergunto|digo|falo|conto|confidencio|cumprimento|guardo|coloco|retiro|tiro|tento|pego|recolho|largo|deixo|entrego|ofereço|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|se)\b)/iu.exec(remaining);
     if (!separator) return [...steps, remaining.trim()];
     steps.push(remaining.slice(0, separator.index).trim().replace(/,$/u, ''));
     if (steps.length === 2) throw new PilotTurnError('PILOT_SEQUENCE_LIMIT', undefined, 3);
@@ -278,10 +278,10 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const explicitSpeech = directedSpeech.exec(action) ?? directedSpeech.exec(syntax);
     const here = records.filter((npc) => npc.location === campaign.currentLocation);
     const storage = storageIntent(commandSyntax);
-    const transferCommand = transferIntent.exec(commandSyntax);
+    const transferCommand = waiting ? null : transferIntent.exec(commandSyntax);
     const delivery = deliveryIntent.exec(commandSyntax);
     const organize = /^(?:eu\s+)?(?:organizo|arrumo|vou\s+(?:organizar|arrumar))\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
-    const opening = /^(?:eu\s+)?(abro|fecho)\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
+    const opening = /^(?:eu\s+)?(abro|escancaro|fecho)\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
     if (opening && actions.length > 1) throw new PilotTurnError('PILOT_OPEN_CLOSE_SEQUENCE');
     if (organize && actions.length > 1) throw new PilotTurnError('PILOT_ENVIRONMENT_SEQUENCE');
     const transferring = transferCommand || delivery || storage;
@@ -303,7 +303,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const target = (kind: PilotFocus['kind']) => context.find((focus) => focus.kind === kind)?.id;
     const selectOutcome = () => {
       if (opening) {
-        const open = normalize(opening[1]) === 'abro';
+        const open = normalize(opening[1]) !== 'fecho';
         const key = targetKey(opening[2]);
         const contextual = /^(?:(?:este|esse|aquele)\s+)?objeto$/u.test(key);
         const matches = catalogObjects.filter(({ id, name, aliases }) => contextual

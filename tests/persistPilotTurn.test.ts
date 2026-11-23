@@ -341,6 +341,21 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       await assert.rejects(play('Examino o bloco.'), { code: 'PILOT_OBJECT_ALREADY_HELD' });
       await assert.rejects(play('Entrego o bloco para Teresa.'), { code: 'PILOT_DELIVERY_NOT_ALLOWED' });
       assert.deepEqual([...docs], carried);
+      const heldItem = docs.get(itemPath);
+      for (const [action, minutes] of [
+        ['Aguardo cinco minutos.', 5], ['Deixo dois minutos passarem.', 2],
+      ] as const) {
+        const before = docs.get(path) as typeof campaign;
+        const wait = next(action);
+        const result = await persistPilotTurn(db, freixoPlayableCatalog, 'dono', wait, noNarration);
+        assert.deepEqual((docs.get(path) as typeof campaign).worldTime, advanceWorldTime(before.worldTime, minutes));
+        assert.deepEqual(docs.get(itemPath), heldItem);
+        assert.equal(docs.has(groundPath), false);
+        const waited = [...docs];
+        assert.deepEqual(await persistPilotTurn(db, freixoPlayableCatalog, 'dono', wait, noNarration),
+          { ...result, mode: 'replay' });
+        assert.deepEqual([...docs], waited);
+      }
       await play('Vou ao quintal.', async () => 'Há luz no quintal.');
       assert.equal(docs.has(itemPath), true);
       const drop = next('Deixo o bloco de madeira no chão.');
@@ -499,6 +514,11 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       assert.equal((await persistPilotTurn(db, freixoPlayableCatalog, 'dono', wait, failNarration)).narration, result.narration);
       assert.deepEqual([...docs], waited);
       assert.deepEqual([...docs].filter(([key]) => key.startsWith(inventoryPath + '/') || key === ownershipPath), untouchedItems);
+      await assert.rejects(play('Examino a bancada e escancaro o armário.'), { code: 'PILOT_OPEN_CLOSE_SEQUENCE', step: 2 });
+      await assert.rejects(play('Deixo dois minutos passarem e examino a bancada.'), { code: 'PILOT_WAIT_SEQUENCE', step: 1 });
+      await assert.rejects(play('Deixo dois ou três minutos passarem.'), { code: 'PILOT_WAIT_UNAVAILABLE', reason: 'unspecified' });
+      await assert.rejects(play('Escancararia o armário.'), { code: 'PILOT_ACTION_UNSUPPORTED' });
+      assert.deepEqual([...docs], waited);
       assert.match((await play('Examino a bancada.')).narration, /A bancada está organizada/);
       assert.match((await play('Examino o armário.')).narration, /O armário está fechado\./);
       const beforeOpening = [...docs];
@@ -506,7 +526,7 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       await assert.rejects(play('Abro a bancada.'), { code: 'PILOT_OPEN_CLOSE_UNAVAILABLE' });
       await assert.rejects(play('Abro a arca.'), { code: 'PILOT_OBJECT_UNREGISTERED' });
       await assert.rejects(play('Abro o armário e examino a bancada.'), { code: 'PILOT_OPEN_CLOSE_SEQUENCE', step: 1 });
-      const open = next('Abro aquele objeto.');
+      const open = next('Escancaro o armário.');
       await assert.rejects(persistPilotTurn(db, freixoPlayableCatalog, 'dono', { ...open, campaignId: 'outra' }, failNarration),
         { code: 'CAMPAIGN_ACCESS_DENIED' });
       await assert.rejects(persistPilotTurn(db, freixoPlayableCatalog, 'outro', open, failNarration),
@@ -520,7 +540,7 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       assert.deepEqual((docs.get(statePath) as { openObjects: string[] }).openObjects, ['demo-armario-cozinha']);
       assert.match((await play('Examino o armário da cozinha.')).narration, /O armário está aberto\./);
       const afterOpening = [...docs];
-      await assert.rejects(play('Abro o armário novamente.'), { code: 'PILOT_OPEN_CLOSE_ALREADY_SET', reason: 'aberto' });
+      await assert.rejects(play('Escancaro o armário novamente.'), { code: 'PILOT_OPEN_CLOSE_ALREADY_SET', reason: 'aberto' });
       assert.deepEqual([...docs], afterOpening);
       assert.equal((await play('Fecho o armário.')).narration, 'O armário está fechado.');
       assert.deepEqual((docs.get(statePath) as { openObjects: string[] }).openObjects, []);
@@ -533,7 +553,7 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       assert.deepEqual([...docs].filter(([key]) => key.startsWith(inventoryPath + '/') || key === ownershipPath), untouchedItems);
       docs.set(path, { ...(docs.get(path) as typeof campaign), currentLocation: freixoWoodWorkshop });
       const distant = [...docs];
-      await assert.rejects(play('Abro o armário da cozinha.'), { code: 'PILOT_OBJECT_OUT_OF_REACH' });
+      await assert.rejects(play('Escancaro o armário da cozinha.'), { code: 'PILOT_OBJECT_OUT_OF_REACH' });
       assert.deepEqual([...docs], distant);
     } finally {
       docs.clear();

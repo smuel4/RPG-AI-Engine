@@ -320,7 +320,14 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     const storeBlock = 'Tento guardar o bloco de madeira dentro do armário.';
     await assert.rejects(submit(storeBlock), { code: 'PILOT_STORAGE_CLOSED', message: /armário está fechado/ });
     assert.deepEqual(await snapshot(), afterPickup);
-    await submit('Abro o armário.');
+    const openedCabinet = await submit('Escancaro o armário.');
+    assert.equal(openedCabinet.result.narration, 'O armário está aberto.');
+    const afterOpening = await snapshot();
+    assert.equal((await openedCabinet.send()).narration, openedCabinet.result.narration);
+    await assert.rejects(submit('Escancaro o armário novamente.'), {
+      code: 'PILOT_OPEN_CLOSE_ALREADY_SET',
+    });
+    assert.deepEqual(await snapshot(), afterOpening);
     const baseStorage = await state();
     const storeAtRevision = (turnId: string) => requestNarratorTurn(owner.idToken, {
       campaignId: ref.id, declaredAction: storeBlock, advanceMinutes: 10,
@@ -352,7 +359,7 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     await submit('Fecho o armário.');
     await submit('Vou ao quintal.');
     assert.equal((await item.get()).exists, true);
-    await submit('Largo o bloco.');
+    await submit('Deixo o bloco.');
     assert.equal((await item.get()).exists, false);
     assert.equal((await ground.get()).data()?.location, familyYard);
     const reopened = initializeApp({ projectId }, 'object-http-reopen');
@@ -407,7 +414,24 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
         /Agora não estou trabalhando\. Estou fazendo uma pausa no quintal\./);
       assert.deepEqual((await reopenedRef.collection('pilotObjectLocations').doc(block).get()).data(), ownership);
       assert.equal((await reopenedRef.collection('inventory').doc(block).get()).exists, false);
-      await assert.rejects(submit('Abro o armário da cozinha.'), { code: 'PILOT_OBJECT_OUT_OF_REACH' });
+      const beforeRefusals = await snapshot();
+      await assert.rejects(submit('Escancaro o armário da cozinha.'), { code: 'PILOT_OBJECT_OUT_OF_REACH' });
+      await assert.rejects(submit('Deixo o bloco.'), { code: 'PILOT_OBJECT_NOT_HELD' });
+      await assert.rejects(submit('Deixo duas horas passarem.'), { code: 'PILOT_WAIT_UNAVAILABLE' });
+      assert.deepEqual(await snapshot(), beforeRefusals);
+      for (const [command, minutes] of [
+        ['Aguardo cinco minutos.', 5], ['Deixo dois minutos passarem.', 2],
+      ] as const) {
+        const before = await state();
+        const waited = await submit(command);
+        assert.deepEqual((await state()).worldTime, advanceWorldTime(before.worldTime, minutes));
+        assert.equal((await state()).currentLocation, before.currentLocation);
+        assert.deepEqual((await ground.get()).data(), ownership);
+        assert.equal((await item.get()).exists, false);
+        const after = await snapshot();
+        assert.equal((await waited.send()).narration, waited.result.narration);
+        assert.deepEqual(await snapshot(), after);
+      }
       await submit('Vou à cozinha.');
       assert.match((await submit('Examino o armário.')).result.narration, /O armário está fechado/);
       const open = await submit('Abro aquele objeto.');

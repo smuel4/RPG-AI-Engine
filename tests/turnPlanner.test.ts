@@ -10,15 +10,24 @@ test('espera calcula somente a duração explicitamente pedida no mesmo dia', ()
   const time = { ...createEchoArcBundle('dono').campaign.worldTime, hour: 9, minute: 45 };
   for (const [text, minutes] of [
     ['Espero 10 minutos.', 10], ['Aguardo 15 minutos.', 15], ['Fico aqui esperando meia hora.', 30],
+    ['Espero 3 minutos.', 3], ['Aguardo cinco minutos.', 5], ['Deixo dois minutos passarem.', 2],
+    ['Eu deixo 1 minuto passar!', 1], ['Espero vinte e três minutos.', 23],
+    ['Aguardo sessenta minutos.', 60], ['Deixo meia hora passar.', 30],
     ['Espero uma hora.', 60], ['Aguardo até as 10h.', 15], ['Aguardo ate 10:30.', 45],
   ] as const) assert.deepEqual(planPilotWait(text, time), { status: 'planned', minutes });
   for (const [text, reason] of [
     ['Aguardo até 9h.', 'past'], ['Aguardo até 24h.', 'invalid'], ['Aguardo até 10h60.', 'invalid'],
     ['Espero um pouco.', 'unspecified'], ['Espero 10 ou 20 minutos.', 'unspecified'],
     ['Espero -1 minuto.', 'limit'], ['Espero 61 minutos.', 'limit'], ['Espero 0 minutos.', 'limit'],
+    ['Espero sessenta e um minutos.', 'limit'], ['Deixo duas horas passarem.', 'limit'],
+    ['Espero vinte e três e quatro minutos.', 'unspecified'],
+    ['Deixo dois ou três minutos passarem.', 'unspecified'],
   ] as const) assert.deepEqual(planPilotWait(text, time), { status: 'refused', reason });
   assert.deepEqual(planPilotWait('Espero 10 minutos.', { ...time, hour: 23, minute: 50 }),
     { status: 'refused', reason: 'midnight' });
+  for (const text of ['Deixo o bloco.', 'Deixo o tempo passar.', 'Deixo dois minutos passarem?']) {
+    assert.equal(planPilotWait(text, time), undefined);
+  }
 });
 const catalog = {
   places: [{ id: 'Porto', aliases: [] }, { id: 'Torre do Norte', aliases: ['torre'] }],
