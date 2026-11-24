@@ -21,7 +21,9 @@ import { generateCampaignNarration, selectNarratorMode, tryAcquireNarratorTurn }
 import { FixedMilestoneNarrator } from './src/engine/narratorPort';
 import { ROOT_TIMELINE_ID } from './src/engine/constants';
 import { readPilotScene } from './server/pilotScene';
-import { permitsStagingPlayer, readStagingConfig, stagingBuildTag } from './server/staging';
+import { pilotCheckpointRoute } from './server/pilotCheckpointRoute';
+import { readStagingConfig, stagingBuildTag } from './server/staging';
+import { verifyInvitedPilotPlayer } from './server/pilotInvitation';
 
 const localFreixo = process.env.VITE_FREIXO_LOCAL === 'true';
 if (!localFreixo && process.env.VITE_FREIXO_STAGING === undefined) dotenv.config();
@@ -64,12 +66,8 @@ const stagingApp = staging && initializeApp({ projectId: staging.web.projectId,
 
 async function verifyRequestPlayer(authorization?: string) {
   if (!staging || !stagingApp) return verifyFirebasePlayer(authorization, serverPilotEnabled);
-  const token = /^Bearer\s+(\S+)$/iu.exec(authorization ?? '')?.[1];
-  if (!token) return null;
-  const decoded = await getAuth(stagingApp).verifyIdToken(token);
-  if (!permitsStagingPlayer(decoded, staging.web.projectId, staging.ownerUid)) return null;
-  const invitation = await getFirestore(stagingApp).doc('stagingAccess/pilot').get();
-  return invitation.data()?.ownerId === decoded.uid ? decoded.uid : null;
+  return verifyInvitedPilotPlayer(getAuth(stagingApp), getFirestore(stagingApp), staging.web.projectId,
+    staging.ownerUid, authorization);
 }
 
 function pilotDatabase() {
@@ -121,6 +119,11 @@ async function startServer() {
       res.sendStatus(503);
     }
   });
+
+  app.route('/api/freixo/checkpoints').all(pilotCheckpointRoute({
+    enabled: staging ? staging.web.checkpoints === true : localFreixo,
+    requireInvitation: Boolean(staging), verifyPlayer: verifyRequestPlayer, database: pilotDatabase,
+  }));
 
   // Stage 2: Turno do Narrador seguro e transacional
   app.post('/api/narrator/turn', async (req, res) => {
@@ -249,7 +252,7 @@ async function startServer() {
               return generateCampaignNarration({ campaign, sceneIntent, declaredAction,
                 narrative, inventory: [], npcs: present.npcs, sceneKnowledge: present.knowledge,
                 npcActivities: present.activities, npcMemories: present.memories, npcRelationships }, mode);
-            }, objectAnswer, clarification);
+            }, objectAnswer, clarification, Boolean(staging));
           res.json({ ...result, turnId: turn.turnId, expectedRevision: turn.expectedRevision, baseTimelineId: turn.baseTimelineId });
         } catch (error) {
           const code = error instanceof PilotTurnError ? error.code : 'PILOT_TURN_FAILED';

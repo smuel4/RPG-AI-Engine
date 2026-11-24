@@ -15,6 +15,7 @@ export const testGroups = {
     'npcRoutine.test.ts',
     'pendingTurn.test.ts',
     'persistPilotTurn.test.ts',
+    'pilotCheckpoints.test.ts',
     'pilotCommandEvaluation.test.ts',
     'staging.test.ts',
     'turnIdentity.test.ts',

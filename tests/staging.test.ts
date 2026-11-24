@@ -23,6 +23,11 @@ test('staging falha fechado e preserva o modo de emulador existente', () => {
   assert.equal(readStagingConfig({ VITE_FREIXO_LOCAL: 'true', FIREBASE_PROJECT_ID: 'demo-rpg-ai-engine' }), undefined);
   assert.equal(readStagingConfig({}), undefined);
   assert.equal(readStagingConfig(env)?.web.projectId, project);
+  assert.equal(readStagingConfig(env)?.web.checkpoints, undefined);
+  assert.equal(readStagingConfig({ ...env, VITE_STAGING_CHECKPOINTS: 'true' })?.web.checkpoints, true);
+  assert.equal(stagingBuildTag({ ...env, VITE_STAGING_CHECKPOINTS: 'false' }), stagingBuildTag(env));
+  assert.notEqual(stagingBuildTag({ ...env, VITE_STAGING_CHECKPOINTS: 'true' }), stagingBuildTag(env));
+  assert.throws(() => readStagingConfig({ ...env, VITE_STAGING_CHECKPOINTS: 'yes' }));
   assert.equal(stagingWebConfig(env)?.authDomain, 'echo-ark-staging.firebaseapp.com');
   for (const id of [project, 'echo-arc-staging-teste']) {
     assert.throws(() => readStagingConfig({ FIREBASE_PROJECT_ID: id }));

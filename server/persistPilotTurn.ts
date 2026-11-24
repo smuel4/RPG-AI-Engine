@@ -12,6 +12,7 @@ import type { Campaign, GameEvent, InventoryItem, NarrativeEntry, NpcRecord, Pil
 import { NARRATION_MAX_LENGTH, validateNarration } from './narratorProvider';
 import { answerPilotQuestion } from './pilotFactualDialogue';
 import { claimsUnconfirmedPlayerConsequence, narratedObjectTransition } from './pilotNarrativeIntegrity';
+import { hasPilotInvitation } from './pilotInvitation';
 
 import { SERVER_PILOT_ID } from '../src/engine/pilotCampaign';
 export { SERVER_PILOT_ID };
@@ -199,7 +200,7 @@ function splitPilotActions(action: string): string[] {
 export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, ownerId: string,
   turn: TurnIdentity, narrate: (campaign: Campaign, sceneIntent: string, npcs: ReturnType<typeof routineScene>,
     relationships: ReturnType<typeof relationshipsInScene>, narrative: NarrativeEntry[], declaredAction: string) => Promise<string>,
-  objectAnswer?: string, clarification?: { binding: string; replayOnly: boolean }) {
+  objectAnswer?: string, clarification?: { binding: string; replayOnly: boolean }, requireInvitation = false) {
   if (!ownerId || turn.campaignId !== SERVER_PILOT_ID || !isTurnId(turn.turnId)) {
     throw new PilotTurnError('CAMPAIGN_ACCESS_DENIED');
   }
@@ -269,11 +270,24 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const snapshot = await tx.get(npcCollection.where('ownerId', '==', ownerId).limit(31));
     const records = snapshot.docs.map((doc) => doc.data() as NpcRecord)
       .filter((npc, index) => npc.id === snapshot.docs[index].id && npc.campaignId === campaign.id && npc.ownerId === ownerId);
-    const history = withHistory ? await tx.get(campaignRef.collection('narrative')
-      .orderBy('sequence', 'desc').limit(24)) : undefined;
-    const narrative = (history?.docs ?? []).map((doc) => doc.data() as NarrativeEntry)
-      .filter((item) => item.campaignId === campaign.id && item.ownerId === ownerId &&
-        item.timelineId === turn.baseTimelineId && item.sequence <= campaign.lastSequence);
+    const narrative: NarrativeEntry[] = [];
+    if (withHistory) {
+      const lineage = getCampaignTimelineLineage(campaign);
+      // Only traverse ancestors when the recorded lineage agrees with the active timeline.
+      const segments = lineage.at(-1)?.timelineId === turn.baseTimelineId ? lineage :
+        [{ timelineId: turn.baseTimelineId, fromSequence: 0, toSequence: null }];
+      for (const segment of segments.slice().reverse()) {
+        const remaining = 24 - narrative.length;
+        if (!remaining) break;
+        const history = await tx.get(campaignRef.collection('narrative')
+          .orderBy('sequence', 'desc')
+          .startAt(Math.min(segment.toSequence ?? campaign.lastSequence, campaign.lastSequence))
+          .endAt(segment.fromSequence).limit(remaining));
+        narrative.push(...history.docs.map((doc) => doc.data() as NarrativeEntry)
+          .filter((item) => item.campaignId === campaign.id && item.ownerId === ownerId &&
+            item.timelineId === segment.timelineId));
+      }
+    }
     return { campaign, entry: null, routineRef, runtime, records, complete: snapshot.size <= 30, narrative, portableState };
   }
   const { campaign, entry, runtime, records = [], complete, narrative = [], portableState = [] } =
@@ -873,6 +887,9 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
       baseNarration.length + 2 + narration.length <= NARRATION_MAX_LENGTH)
     : [];
   return db.runTransaction(async (tx) => {
+    if (requireInvitation && !(await hasPilotInvitation(db, ownerId, tx))) {
+      throw new PilotTurnError('CAMPAIGN_ACCESS_DENIED');
+    }
     const current = await read(tx);
     if (current.entry) return { mode: 'replay' as const, narration: current.entry.content, expectedLastSequence: current.entry.sequence - 2 };
     if (current.campaign.currentLocation !== campaign.currentLocation || current.campaign.lastSequence !== campaign.lastSequence ||

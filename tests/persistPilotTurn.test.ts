@@ -1458,6 +1458,8 @@ test('turno servidor aplica a rota e recupera o recibo sem narrar de novo', asyn
       { code: 'PILOT_OBSERVATION_UNAVAILABLE', step: 2, absentNpcName: 'Lira' });
     assert.deepEqual([...docs], beforeTravel);
     await persistPilotTurn(db, wellCatalog, 'dono', next('Digo para ela: Bom dia.'), contextual);
+    // Establish a place within the same bounded history window used by Firestore.
+    await persistPilotTurn(db, wellCatalog, 'dono', next('Observo o poço.'), async () => 'A água reflete a luz.');
     await persistPilotTurn(db, wellCatalog, 'dono', next('Observo aquele lugar.'), async (_scene, intent) => {
       assert.ok(intent.includes(villageWell));
       return 'A água reflete a luz.';

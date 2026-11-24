@@ -5,9 +5,12 @@ export function stagingWebConfig(env: Record<string, string | undefined>) {
   const projectId = env.VITE_STAGING_PROJECT_ID ?? '';
   const apiKey = env.VITE_STAGING_API_KEY ?? '';
   const appId = env.VITE_STAGING_APP_ID ?? '';
+  const checkpoints = env.VITE_STAGING_CHECKPOINTS;
   if (env.VITE_FREIXO_LOCAL === 'true' || projectId !== STAGING_PROJECT_ID ||
+      (checkpoints !== undefined && checkpoints !== 'true' && checkpoints !== 'false') ||
       !/^AIza[\w-]{35}$/u.test(apiKey) || !/^1:\d+:web:[a-f0-9]+$/u.test(appId)) {
     throw new Error('Configuração pública de staging ausente ou inválida.');
   }
-  return { projectId, apiKey, appId, authDomain: projectId + '.firebaseapp.com' };
+  return { projectId, apiKey, appId, authDomain: projectId + '.firebaseapp.com',
+    ...(checkpoints === 'true' ? { checkpoints: true } : {}) };
 }

@@ -18,7 +18,12 @@ import { familyYard } from '../scripts/echoArcFreeTurn';
 import { familyKitchen } from '../scripts/echoArcContinuityFixture';
 import { advanceWorldTime } from '../src/engine/rulesEngine';
 import { NarratorRequestError, requestNarratorTurn, requestPilotScene } from '../src/services/narratorClient';
+import { requestPilotCheckpoints, sendPilotCheckpoint } from '../src/services/pilotCheckpointClient';
 import { freixoEmulatorPorts } from '../server/freixoEmulatorPorts.mjs';
+import { pilotCheckpointRoute } from '../server/pilotCheckpointRoute';
+import { verifyInvitedPilotPlayer } from '../server/pilotInvitation';
+import { clearPendingCheckpoint, loadPendingCheckpoint, savePendingCheckpoint } from '../src/services/pendingCheckpoint';
+import type { Request, Response } from 'express';
 
 test('exame e atividade da bancada pela API local com Auth e Firestore emulados', async (t) => {
   const ports = freixoEmulatorPorts(process.env.FREIXO_TEST_ALT_PORTS === '1');
@@ -107,11 +112,14 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     const server = await startServer();
     let loseConfirmation = false;
     let lostNarration: string | undefined;
+    let lostCheckpoint: unknown;
     t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
       const response = await http(base + url, options);
       if (loseConfirmation && response.ok) {
         loseConfirmation = false;
-        lostNarration = (await response.json()).narration;
+        const committed = await response.json();
+        if (url === '/api/freixo/checkpoints') lostCheckpoint = committed;
+        else lostNarration = committed.narration;
         throw new TypeError('Confirmação perdida pelo cliente');
       }
       return response;
@@ -503,6 +511,96 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
       await submit('Vou ao poço.');
       assert.equal((await readScene()).location, villageWell);
       assert.deepEqual((await state()).worldTime, advanceWorldTime(beforeWoodland.worldTime, 10));
+      const checkpointPath = base + '/api/freixo/checkpoints';
+      assert.equal((await http(checkpointPath)).status, 401);
+      assert.equal((await http(checkpointPath, { headers: { Authorization: 'Bearer ' + outsider.idToken } })).status, 403);
+      const atWell = await state();
+      const save = { action: 'save' as const, campaignId: ref.id, requestId: crypto.randomUUID(),
+        expectedRevision: atWell.revision, baseTimelineId: atWell.activeTimelineId ?? 'tl_root',
+        label: 'Poço', note: '' };
+      await assert.rejects(sendPilotCheckpoint(owner.idToken, { ...save, campaignId: ordinary.id }), /incompatível/);
+      const scope = { environment: 'local', ownerId: owner.claims.uid, campaignId: ref.id } as const;
+      const session = new Map<string, string>();
+      const storage = () => ({ getItem: (key: string) => session.get(key) ?? null,
+        setItem: (key: string, value: string) => session.set(key, value),
+        removeItem: (key: string) => session.delete(key) }) as unknown as Storage;
+      let checkpointServer = restarted;
+      const recover = async (request: typeof save | (Omit<typeof save, 'action' | 'label' | 'note'> &
+        { action: 'restore'; checkpointId: string })) => {
+        savePendingCheckpoint(storage(), scope, request);
+        loseConfirmation = true;
+        await assert.rejects(sendPilotCheckpoint(owner.idToken, request), /Confirmação perdida/);
+        const committed = await state();
+        const exited = once(checkpointServer, 'exit');
+        checkpointServer.kill();
+        await exited;
+        checkpointServer = await startServer();
+        const afterReload = loadPendingCheckpoint(storage(), scope);
+        assert.deepEqual(afterReload, request);
+        const result = await sendPilotCheckpoint(owner.idToken, afterReload!);
+        assert.deepEqual(result, lostCheckpoint);
+        assert.deepEqual(await state(), committed);
+        clearPendingCheckpoint(storage(), scope, request.requestId);
+        assert.equal(loadPendingCheckpoint(storage(), scope), null);
+        return result;
+      };
+      const saved = await recover(save);
+      const summaries = await requestPilotCheckpoints(owner.idToken, new AbortController().signal);
+      assert.equal(summaries[0].id, saved.checkpointId);
+      assert.equal(summaries[0].currentLocation, villageWell);
+      const moved = await submit('Vou ao Bosque de Freixo.');
+      const restore = { action: 'restore' as const, campaignId: ref.id, requestId: crypto.randomUUID(),
+        expectedRevision: (await state()).revision, baseTimelineId: saved.timelineId, checkpointId: saved.checkpointId };
+      const restored = await recover(restore);
+      assert.deepEqual(await sendPilotCheckpoint(owner.idToken, restore), restored);
+      assert.deepEqual((await state()).worldTime, atWell.worldTime);
+      assert.equal((await readScene()).location, villageWell);
+      assert.equal((await readScene()).timelineId, restored.timelineId);
+      await assert.rejects(moved.send(), { code: 'CONCURRENT_STATE_CONFLICT' });
+
+      // Exercise the staging handler against the synthetic project without changing startup guards.
+      const invitation = db.collection('stagingAccess').doc('pilot');
+      await invitation.set({ ownerId: owner.claims.uid });
+      const invokeStaging = async (enabled: boolean, token: string, body?: object, revokeAfterAuth = false) => {
+        let status = 200;
+        let payload: unknown;
+        const response = {
+          set: () => response, status: (value: number) => { status = value; return response; },
+          sendStatus: (value: number) => { status = value; },
+          json: (value: unknown) => { payload = value; },
+        };
+        await pilotCheckpointRoute({ enabled, requireInvitation: true, database: () => db,
+          verifyPlayer: async (header) => {
+            const uid = await verifyInvitedPilotPlayer(auth, db, projectId, owner.claims.uid, header);
+            if (uid && revokeAfterAuth) await invitation.delete();
+            return uid;
+          },
+        })({ method: body ? 'POST' : 'GET', body, get: () => 'Bearer ' + token } as unknown as Request,
+          response as unknown as Response, () => assert.fail('Rota de checkpoint não deve delegar.'));
+        return { status, payload };
+      };
+      assert.equal((await invokeStaging(false, owner.idToken)).status, 404);
+      assert.equal((await invokeStaging(true, outsider.idToken)).status, 401);
+      assert.equal((await invokeStaging(true, unverified.idToken)).status, 401);
+      const confirmed = await invokeStaging(true, owner.idToken, restore);
+      assert.deepEqual(confirmed, { status: 200, payload: restored });
+      assert.equal((await invokeStaging(false, owner.idToken, restore)).status, 404);
+      assert.deepEqual(await invokeStaging(true, owner.idToken, restore), confirmed);
+      const beforeStagingSave = await state();
+      await ref.collection('npcRoutineState').doc(restored.timelineId).delete();
+      const legacySave = { ...save, requestId: crypto.randomUUID(), expectedRevision: beforeStagingSave.revision,
+        baseTimelineId: restored.timelineId };
+      const accepted = await invokeStaging(true, owner.idToken, legacySave);
+      assert.equal(accepted.status, 200);
+      const legacyId = (accepted.payload as { checkpointId: string }).checkpointId;
+      assert.equal((await ref.collection('pilotCheckpoints').doc(legacyId).get()).data()?.runtime, null);
+      assert.equal((await state()).revision, beforeStagingSave.revision + 1);
+      const beforeRevocation = await state();
+      const revokedSave = { ...legacySave, requestId: crypto.randomUUID(), expectedRevision: beforeRevocation.revision };
+      assert.equal((await invokeStaging(true, owner.idToken, revokedSave, true)).status, 403);
+      assert.deepEqual(await state(), beforeRevocation);
+      assert.equal((await ref.collection('pilotCheckpointReceipts').doc(revokedSave.requestId).get()).exists, false);
+      assert.equal((await invokeStaging(true, owner.idToken, restore)).status, 401);
     } finally {
       await deleteApp(reopened);
     }

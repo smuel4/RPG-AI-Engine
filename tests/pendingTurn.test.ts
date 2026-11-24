@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { clearPendingTurn, loadPendingTurn, releaseRejectedPilotTurn, savePendingTurn } from '../src/services/pendingTurn';
 import { NarratorRequestError, requestNarratorTurn } from '../src/services/narratorClient';
+import { clearPendingCheckpoint, loadPendingCheckpoint, savePendingCheckpoint } from '../src/services/pendingCheckpoint';
 
 const turn = {
   turnId: 'a834b1ac-d3b4-4439-9f71-a135722ce71a', campaignId: 'campanha',
@@ -18,6 +19,27 @@ function makeStorage(entries = new Map<string, string>()): Storage {
     removeItem: (key) => { entries.delete(key); },
   };
 }
+
+test('checkpoint pendente conserva a identidade após recarga e fica isolado por ambiente, usuário e campanha', () => {
+  for (const action of [{ action: 'save', label: 'Poço', note: 'Teste' },
+    { action: 'restore', checkpointId: 'anterior' }] as const) {
+    const scope = { environment: 'staging', ownerId: 'dono', campaignId: turn.campaignId } as const;
+    const request = { ...action, campaignId: turn.campaignId, requestId: turn.turnId,
+      expectedRevision: turn.expectedRevision, baseTimelineId: turn.baseTimelineId };
+    const entries = new Map<string, string>();
+    savePendingCheckpoint(makeStorage(entries), scope, request);
+    const reloaded = makeStorage(entries);
+    assert.deepEqual(loadPendingCheckpoint(reloaded, scope), request);
+    assert.equal(loadPendingCheckpoint(reloaded, { ...scope, environment: 'local' }), null);
+    assert.equal(loadPendingCheckpoint(reloaded, { ...scope, ownerId: 'outro' }), null);
+    assert.equal(loadPendingCheckpoint(reloaded, { ...scope, campaignId: 'outra' }), null);
+    assert.throws(() => savePendingCheckpoint(reloaded, scope, { ...request, requestId: crypto.randomUUID() }));
+    clearPendingCheckpoint(reloaded, scope, crypto.randomUUID());
+    assert.deepEqual(loadPendingCheckpoint(reloaded, scope), request);
+    clearPendingCheckpoint(reloaded, scope, request.requestId);
+    assert.equal(loadPendingCheckpoint(reloaded, scope), null);
+  }
+});
 
 test('recarregamento restaura somente o turno do usuário e da campanha selecionados', () => {
   const entries = new Map<string, string>();

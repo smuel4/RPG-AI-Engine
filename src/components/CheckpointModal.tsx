@@ -1,16 +1,17 @@
 import { useState, type FormEvent } from 'react';
 import { RotateCcw, Save, X } from 'lucide-react';
-import type { Campaign, Checkpoint } from '../types/game';
+import type { Campaign } from '../types/game';
+import type { CheckpointSummary } from '../engine/pilotCheckpoint';
 import { formatWorldTimeLabel } from '../engine/constants';
 
 interface CheckpointModalProps {
   mode: 'save' | 'load' | null;
   campaign: Campaign;
-  checkpoints: Checkpoint[];
+  checkpoints: CheckpointSummary[];
   isMutating: boolean;
   onClose: () => void;
   onSaveCheckpoint: (label: string, note: string) => Promise<boolean>;
-  onRestoreCheckpoint: (checkpoint: Checkpoint) => Promise<boolean>;
+  onRestoreCheckpoint: (checkpointId: string) => Promise<boolean>;
 }
 
 export function CheckpointModal({
@@ -38,8 +39,9 @@ export function CheckpointModal({
     }
   };
 
-  const handleRestore = async (cp: Checkpoint) => {
-    const ok = await onRestoreCheckpoint(cp);
+  const handleRestore = async (cp: CheckpointSummary) => {
+    if (!window.confirm(`Restaurar "${cp.label}"? A campanha continuará em uma nova linha temporal.`)) return;
+    const ok = await onRestoreCheckpoint(cp.id);
     if (ok) {
       onClose();
     }
@@ -167,7 +169,7 @@ export function CheckpointModal({
                       {cp.currentLocation} · {formatWorldTimeLabel(cp.worldTime)}
                     </p>
                     <p className="font-mono-tabular text-[11px] text-[#9CA3AF]">
-                      Rev. {cp.revision} · {cp.inventorySnapshot.length} itens ·{' '}
+                      Rev. {cp.revision} · {cp.inventoryCount} itens ·{' '}
                       {cp.currency.gold}o {cp.currency.silver}p {cp.currency.copper}c
                     </p>
                     {cp.note && (

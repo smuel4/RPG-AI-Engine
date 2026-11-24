@@ -12,6 +12,7 @@ export function readStagingConfig(env: Record<string, string | undefined>) {
     if ((env.VITE_FREIXO_STAGING !== undefined && env.VITE_FREIXO_STAGING !== 'false') ||
         env.STAGING_SERVICE_ACCOUNT_JSON || env.STAGING_OWNER_UID || env.STAGING_CLARIFICATION_KEY ||
         env.VITE_STAGING_PROJECT_ID || env.VITE_STAGING_API_KEY || env.VITE_STAGING_APP_ID ||
+        env.VITE_STAGING_CHECKPOINTS === 'true' ||
         env.FIREBASE_PROJECT_ID === STAGING_PROJECT_ID ||
         // Legacy staging names still fail closed instead of falling through to general mode.
         env.FIREBASE_PROJECT_ID?.startsWith('echo-arc-staging-')) {

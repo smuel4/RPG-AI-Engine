@@ -15,8 +15,10 @@ const stagingConfig = stagingWebConfig({
   VITE_STAGING_PROJECT_ID: import.meta.env?.VITE_STAGING_PROJECT_ID,
   VITE_STAGING_API_KEY: import.meta.env?.VITE_STAGING_API_KEY,
   VITE_STAGING_APP_ID: import.meta.env?.VITE_STAGING_APP_ID,
+  VITE_STAGING_CHECKPOINTS: import.meta.env?.VITE_STAGING_CHECKPOINTS,
 });
 export const stagingFreixo = Boolean(stagingConfig);
+export const stagingCheckpoints = stagingConfig?.checkpoints === true;
 if (localFreixo && window.location.hostname !== '127.0.0.1') {
   throw new Error('Freixo local só pode abrir em 127.0.0.1.');
 }

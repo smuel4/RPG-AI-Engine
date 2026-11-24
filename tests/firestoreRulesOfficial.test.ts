@@ -38,7 +38,8 @@ test('regras de staging isolam a campanha reservada e as coleções privadas', a
     await env.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();
       for (const target of ['stagingAccess/pilot', path, 'campaigns/geral', path + '/narrative/a',
-        path + '/npcRoutineState/tl_root', path + '/turnReceipts/turno', path + '/checkpoints/um']) {
+        path + '/npcRoutineState/tl_root', path + '/turnReceipts/turno', path + '/checkpoints/um',
+        path + '/pilotCheckpoints/um', path + '/pilotCheckpointReceipts/um']) {
         await setDoc(doc(db, target), { ownerId: 'convidado' });
       }
     });
@@ -50,10 +51,12 @@ test('regras de staging isolam a campanha reservada e as coleções privadas', a
     for (const db of [other, unverified, env.unauthenticatedContext().firestore()]) {
       await assertFails(getDoc(doc(db, path)));
     }
-    for (const target of ['campaigns/geral', path + '/npcRoutineState/tl_root', path + '/turnReceipts/turno', path + '/checkpoints/um']) {
+    const privateCheckpoints = [path + '/pilotCheckpoints/um', path + '/pilotCheckpointReceipts/um'];
+    for (const target of ['campaigns/geral', path + '/npcRoutineState/tl_root', path + '/turnReceipts/turno',
+      path + '/checkpoints/um', ...privateCheckpoints]) {
       await assertFails(getDoc(doc(guest, target)));
     }
-    for (const target of [path, path + '/narrative/a', path + '/checkpoints/um', 'stagingAccess/pilot']) {
+    for (const target of [path, path + '/narrative/a', path + '/checkpoints/um', 'stagingAccess/pilot', ...privateCheckpoints]) {
       await assertFails(setDoc(doc(guest, target), { ownerId: 'convidado' }));
     }
   } finally {

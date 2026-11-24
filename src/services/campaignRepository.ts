@@ -186,8 +186,8 @@ export function subscribeCampaignDetails(
     (err) => emitError(err, OperationType.LIST, `${basePath}/events`),
   );
 
-  if (stagingFreixo) callbacks.onCheckpoints([]);
-  const unsubCheckpoints = stagingFreixo ? undefined : onSnapshot(
+  if (localFreixo || stagingFreixo) callbacks.onCheckpoints([]);
+  const unsubCheckpoints = localFreixo || stagingFreixo ? undefined : onSnapshot(
     query(collection(db, basePath, 'checkpoints'), where('ownerId', '==', uid)),
     (snap) => {
       const list = snap.docs.map((d) => d.data() as Checkpoint);

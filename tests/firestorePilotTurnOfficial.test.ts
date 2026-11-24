@@ -6,6 +6,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { initializeApp as initializeClient, deleteApp as deleteClient } from 'firebase/app';
 import { connectFirestoreEmulator, doc, getDoc, getFirestore as clientFirestore, serverTimestamp, setDoc, updateDoc, terminate } from 'firebase/firestore';
 import { persistPilotTurn, SERVER_PILOT_ID } from '../server/persistPilotTurn';
+import { mutatePilotCheckpoint } from '../server/pilotCheckpoints';
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import { advanceWorldTime } from '../src/engine/rulesEngine';
 import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
@@ -117,9 +118,17 @@ test('piloto grava chegada uma vez e o navegador não escreve estado nem recibos
     const relationships = (await runtime.ref.get()).data()!.relationships;
     assert.equal(relationships.length, 1);
     assert.equal(relationships[0].disclosure.turnId, disclosure.turnId);
+    const saved = await mutatePilotCheckpoint(db, 'dono', { action: 'save', campaignId: ref.id,
+      expectedRevision: revision + 3, baseTimelineId: turn.baseTimelineId, requestId: crypto.randomUUID(),
+      label: 'Antes do poço', note: '' });
+    for (const [collection, id] of [['pilotCheckpoints', saved.checkpointId], ['pilotCheckpointReceipts', 'forjado']]) {
+      const protectedDoc = doc(browser, 'campaigns', ref.id, collection, id);
+      await assert.rejects(getDoc(protectedDoc), /permission|insufficient/i);
+      await assert.rejects(setDoc(protectedDoc, { ownerId: 'dono' }), /permission|insufficient/i);
+    }
     const lira = createWellEncounterNpc('dono', SERVER_PILOT_ID);
     await npcRef.doc(lira.id).set(lira);
-    const visit = { ...turn, turnId: crypto.randomUUID(), expectedRevision: revision + 3,
+    const visit = { ...turn, turnId: crypto.randomUUID(), expectedRevision: saved.revision,
       declaredAction: 'Vou até o poço' };
     const wellCatalog = { places: [...catalog.places, { id: villageWell, aliases: ['poço'] }],
       routes: [...catalog.routes, { from: home, to: villageWell, minutes: 6 }] };
@@ -131,6 +140,76 @@ test('piloto grava chegada uma vez e o navegador não escreve estado nem recibos
     const stored = (await runtime.ref.get()).data()!.relationships;
     assert.equal(stored.length, 2);
     assert.equal(stored.find((entry: { from: string }) => entry.from === lira.id)?.firstEncounter.turnId, visit.turnId);
+    const restore = { action: 'restore', campaignId: ref.id, checkpointId: saved.checkpointId,
+      expectedRevision: saved.revision + 1, baseTimelineId: turn.baseTimelineId, requestId: crypto.randomUUID() };
+    const [restored, retried] = await Promise.all([
+      mutatePilotCheckpoint(db, 'dono', restore), mutatePilotCheckpoint(db, 'dono', restore),
+    ]);
+    assert.deepEqual(restored, retried);
+    assert.equal((await ref.get()).data()?.currentLocation, home);
+    assert.equal((await npcRef.doc(lira.id).get()).exists, false);
+    const branchState = (await ref.collection('npcRoutineState').doc(restored.timelineId).get()).data()!;
+    assert.deepEqual(branchState.relationships, relationships.map((entry: object) => ({ ...entry, timelineId: restored.timelineId })));
+    assert.ok(branchState.memories.some(({ turnId }: { turnId: string }) => turnId === disclosure.turnId));
+    await assert.rejects(persistPilotTurn(db, wellCatalog, 'dono', visit, async () => assert.fail()), /CONCURRENT_STATE_CONFLICT/);
+
+    const identity = async () => {
+      const current = (await ref.get()).data()!;
+      return { campaignId: ref.id, expectedRevision: Number(current.revision),
+        baseTimelineId: String(current.activeTimelineId) };
+    };
+    const invitation = db.collection('stagingAccess').doc('pilot');
+    await invitation.set({ ownerId: 'dono' });
+    const saveAction = { action: 'save', label: 'Corrida', note: '' };
+    const restoreAction = { action: 'restore', checkpointId: saved.checkpointId };
+    const checkpointReceipts = ref.collection('pilotCheckpointReceipts');
+    for (const actions of [[restoreAction, restoreAction], [saveAction, restoreAction], [restoreAction, saveAction]]) {
+      const origin = await identity();
+      const requests = actions.map((action) => ({ ...origin, ...action, requestId: crypto.randomUUID() }));
+      const outcomes = await Promise.allSettled(requests.map((request) => mutatePilotCheckpoint(db, 'dono', request, true)));
+      const winner = outcomes.findIndex((outcome) => outcome.status === 'fulfilled');
+      assert.ok(winner >= 0);
+      const loser = 1 - winner;
+      assert.equal(outcomes[loser].status, 'rejected');
+      assert.equal((await identity()).expectedRevision, origin.expectedRevision + 1);
+      const receipt = (await checkpointReceipts.doc(requests[winner].requestId).get()).data();
+      assert.ok(receipt);
+      assert.equal((await identity()).baseTimelineId, receipt.result.timelineId);
+      assert.equal((await checkpointReceipts.doc(requests[loser].requestId).get()).exists, false);
+    }
+
+    for (const action of [saveAction, restoreAction]) {
+      const origin = await identity();
+      const pending = { ...turn, ...origin, turnId: crypto.randomUUID(), declaredAction: 'Vou até a praça' };
+      await assert.rejects(persistPilotTurn(db, catalog, 'dono', pending, async () => {
+        await mutatePilotCheckpoint(db, 'dono', { ...origin, ...action, requestId: crypto.randomUUID() }, true);
+        return scene;
+      }, undefined, undefined, true), /CONCURRENT_STATE_CONFLICT/);
+      assert.equal((await identity()).expectedRevision, origin.expectedRevision + 1);
+      assert.equal((await ref.collection('turnReceipts').doc(pending.turnId).get()).exists, false);
+
+      // Start with the same precondition, then let the turn win before attempting the checkpoint.
+      const turnFirstOrigin = await identity();
+      const winner = { ...pending, ...turnFirstOrigin, turnId: crypto.randomUUID() };
+      await persistPilotTurn(db, catalog, 'dono', winner, async () => scene, undefined, undefined, true);
+      const late = { ...turnFirstOrigin, ...action, requestId: crypto.randomUUID() };
+      await assert.rejects(mutatePilotCheckpoint(db, 'dono', late, true), /campanha mudou/i);
+      assert.equal((await checkpointReceipts.doc(late.requestId).get()).exists, false);
+      const reset = await identity();
+      await mutatePilotCheckpoint(db, 'dono', { ...reset, ...restoreAction, requestId: crypto.randomUUID() }, true);
+    }
+
+    const origin = await identity();
+    const revokedTurn = { ...turn, ...origin, turnId: crypto.randomUUID(), declaredAction: 'Vou até a praça' };
+    await assert.rejects(persistPilotTurn(db, catalog, 'dono', revokedTurn, async () => {
+      await invitation.delete();
+      return scene;
+    }, undefined, undefined, true), /CAMPAIGN_ACCESS_DENIED/);
+    assert.deepEqual(await identity(), origin);
+    const denied = { ...origin, ...saveAction, requestId: crypto.randomUUID() };
+    await assert.rejects(mutatePilotCheckpoint(db, 'dono', denied, true), /Convite/);
+    assert.equal((await checkpointReceipts.doc(denied.requestId).get()).exists, false);
+    assert.equal((await ref.collection('turnReceipts').doc(revokedTurn.turnId).get()).exists, false);
   } finally {
     await terminate(browser);
     await deleteClient(app);

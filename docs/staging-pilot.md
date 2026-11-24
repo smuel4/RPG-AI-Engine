@@ -13,6 +13,7 @@ Este modo usa a mesma transação de turno, recibo e projeção de rotinas do pi
 | Nome | Valor ou origem |
 | --- | --- |
 | VITE_FREIXO_STAGING | true |
+| VITE_STAGING_CHECKPOINTS | Omitida ou false por padrão. true exige autorização de publicação e o mesmo valor no build e no runtime |
 | VITE_STAGING_PROJECT_ID | echo-ark-staging |
 | VITE_STAGING_API_KEY | Chave pública da configuração Web desse projeto |
 | VITE_STAGING_APP_ID | App ID público da configuração Web |
@@ -39,11 +40,23 @@ npx.cmd --no-install firebase deploy --only firestore:rules --config firebase.st
 node --import tsx scripts/provision-staging-pilot.ts --apply $env:FIREBASE_PROJECT_ID
 ```
 
-O provisionamento só deve ser executado após autorização. Ele cria o convite, a campanha e os NPCs em um lote de criação, que falha integralmente se qualquer documento de destino existir. Para revogar acesso, remova stagingAccess/pilot. O servidor exige que esse documento concorde com o UID configurado e volta a conferir autoria na transação do piloto.
+O provisionamento só deve ser executado após autorização. Ele cria o convite, a campanha e os NPCs em um lote de criação, que falha integralmente se qualquer documento de destino existir. Para revogar o acesso ao piloto, remova `stagingAccess/pilot`. A API verifica o convite por requisição e o relê dentro das transações de escrita de turnos e checkpoints. Se a remoção entrar primeiro na ordem de commit do Firestore, a operação perde a autorização. Revogar a sessão no Firebase Auth impede a renovação da sessão. O piloto usa o convite para bloquear também o uso de tokens já emitidos.
 
 3. Configure um único Render Web Service Free, com Node 22 LTS atualizado ou 24 LTS, sem meio de pagamento. Use build `npm ci --include=dev && npm run build`, start `npm start` e health check `/api/health`. Configure as variáveis acima antes do build e habilite a origem pública do serviço nos domínios autorizados do Firebase Auth. Mantenha os deploys automáticos desligados durante o ensaio. Frontend e API compartilham a origem.
 4. Confirme que a conta convidada pode abrir a campanha e persistir a ida ao quintal, receber o convite de Henrique e recuperar um turno após recarga ou reinício sem duplicação. Teste PC e celular. Em outra conta, verifique a recusa na API e na leitura do Firestore. Teste escrita direta, ID de campanha comum e acesso a estado privado e recibos. O site estático pode ser público. A proteção é aplicada aos dados e às operações.
-5. Compartilhe a URL somente depois dessas verificações. Nesta versão salvar e restaurar checkpoints fica bloqueado no staging, tanto na interface quanto pelas regras do banco. Testes que dependam de checkpoints precisam aguardar um fluxo autoritativo que inclua estado privado e corte de timeline.
+5. Compartilhe a URL somente depois dessas verificações. A flag desabilita os checkpoints no staging por padrão. As regras do banco bloqueiam o acesso direto aos snapshots e recibos mesmo com a API habilitada.
+
+## Checkpoints autoritativos no piloto local
+
+Em PowerShell, execute `npm.cmd run verify:engine:http -- --alternate --visual` e abra `http://127.0.0.1:13219`. Entre com a conta emulada indicada pelo launcher e abra a campanha reservada de Freixo. Salve um checkpoint, confirme um turno que mude o local e o relógio e então selecione **Carregar**. Confira o local, a data, a hora e a revisão do checkpoint e confirme a restauração. O histórico ativo deve terminar no ponto salvo e continuar na nova linha temporal. A sessão usa dados descartáveis.
+
+A transação grava estado público e privado, revisão, evento e recibo. A restauração mantém as entradas e recibos antigos para auditoria, e o histórico do narrador segue os cortes da linha ativa. A API lista até 30 checkpoints recentes e entrega apenas metadados. Checkpoints legados do fluxo geral continuam no formato original. Os limites atômicos e de tamanho podem recusar operações grandes sem alterar a campanha.
+
+Para habilitar o recurso online, é necessária autorização explícita após aprovação do gate completo em emuladores e teste visual local. A flag faz parte da assinatura da configuração pública do build. O servidor valida essa assinatura no início. Com a flag ativa, a rota usa o Auth e o convite do projeto de staging e mantém a autoria transacional. Desabilitar a flag exige um build correspondente e preserva os snapshots, recibos e operações pendentes. A validação deve cobrir acesso direto negado aos snapshots e recibos, restauração concorrente com um turno, repetição após reinício e ausência de vazamento de memórias. Use uma campanha descartável no primeiro ensaio online.
+
+Ao perder a resposta de um checkpoint, recarregue a mesma aba, entre com a mesma conta se necessário e escolha **Retomar checkpoint**. A identidade do pedido fica no armazenamento da sessão da aba, vinculada ao ambiente, à conta e à campanha. O reenvio usa o mesmo recibo. Fechar a aba ou apagar o armazenamento pode eliminar a referência local.
+
+As duas notas estáticas pessoais identificadas no bundle descrevem familiaridade de Teresa com a vila e ensinamentos de Henrique que Samuel já recebeu. São conteúdo narrativo inofensivo conhecido pelo protagonista. O rótulo pessoal governa a fala de cada NPC. Memórias gravadas em jogo e futuras revelações confidenciais pertencem ao servidor.
 
 ## Reinício e limites
 

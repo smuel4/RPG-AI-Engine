@@ -10,7 +10,6 @@ import {
 } from 'lucide-react';
 import type {
   Campaign,
-  Checkpoint,
   GameEvent,
   GameEventType,
   NarrativeEntry,
@@ -23,7 +22,7 @@ interface WorldSidebarProps {
   events: GameEvent[];
   eventStatuses?: Record<string, TimelineAuditStatus>;
   supersededNarrative?: NarrativeEntry[];
-  checkpoints: Checkpoint[];
+  checkpointCount: number;
   isMutating: boolean;
   onAdvanceTime?: (minutes: number) => void;
   onOpenSaveCheckpoint?: () => void;
@@ -49,7 +48,7 @@ export function WorldSidebar({
   events,
   eventStatuses = {},
   supersededNarrative = [],
-  checkpoints,
+  checkpointCount,
   isMutating,
   onAdvanceTime,
   onOpenSaveCheckpoint,
@@ -125,7 +124,7 @@ export function WorldSidebar({
             Pontos de Controle
           </h2>
           <span className="font-mono-tabular text-xs text-[#9CA3AF]">
-            {checkpoints.length} salvos
+            {checkpointCount} salvos
           </span>
         </div>
 

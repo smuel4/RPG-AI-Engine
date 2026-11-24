@@ -38,7 +38,7 @@ import type { PilotScene } from './types/game';
 import { clearPendingTurn, loadPendingTurn, releaseRejectedPilotTurn, savePendingTurn, type PendingTurn } from './services/pendingTurn';
 import { checkTurnRevision } from './engine/turnIdentity';
 import { selectOwnedCampaignId, SERVER_PILOT_ID } from './engine/pilotCampaign';
-import { formatPersistenceError, localFreixo, stagingFreixo } from './services/firebaseClient';
+import { formatPersistenceError, localFreixo, stagingFreixo, stagingCheckpoints } from './services/firebaseClient';
 import type {
   Campaign,
   Checkpoint,
@@ -59,8 +59,14 @@ import { NarrativeStage } from './components/NarrativeStage';
 import { WorldSidebar } from './components/WorldSidebar';
 import { CampaignHubModal } from './components/CampaignHubModal';
 import { CheckpointModal } from './components/CheckpointModal';
+import { summarizeCheckpoint, type CheckpointSummary, type PilotCheckpointAction } from './engine/pilotCheckpoint';
+import { CheckpointRequestError, requestPilotCheckpoints, sendPilotCheckpoint } from './services/pilotCheckpointClient';
+import { clearPendingCheckpoint, loadPendingCheckpoint, savePendingCheckpoint } from './services/pendingCheckpoint';
 
 const restrictedPilot = localFreixo || stagingFreixo;
+const pilotCheckpointsEnabled = localFreixo || stagingCheckpoints;
+const checkpointsEnabled = !restrictedPilot || pilotCheckpointsEnabled;
+const checkpointEnvironment = stagingFreixo ? 'staging' : 'local';
 
 type MobileTab = 'narrative' | 'character' | 'world';
 
@@ -136,11 +142,36 @@ export default function App() {
   const pendingTurn = user?.emailVerified && activeCampaign?.ownerId === user.uid &&
     activeCampaign.id === selectedCampaignId ? readPendingTurn(user.uid, activeCampaign.id) : null;
   const activeClarification = clarification?.ownerId === user?.uid &&
-    clarification?.turn.campaignId === selectedCampaignId ? clarification : null;
+    clarification?.turn.campaignId === selectedCampaignId &&
+    clarification?.turn.expectedRevision === pilotRevision &&
+    clarification?.turn.baseTimelineId === pilotTimeline ? clarification : null;
 
   const [mobileTab, setMobileTab] = useState<MobileTab>('narrative');
   const [campaignHubOpen, setCampaignHubOpen] = useState(false);
   const [checkpointMode, setCheckpointMode] = useState<'save' | 'load' | null>(null);
+  const [pilotCheckpointList, setPilotCheckpointList] = useState<{
+    ownerId: string; values: CheckpointSummary[];
+  } | null>(null);
+  const [checkpointListVersion, setCheckpointListVersion] = useState(0);
+  const checkpointScope = pilotCheckpointsEnabled && pilotCampaign && user?.emailVerified &&
+    activeCampaign.ownerId === user.uid && activeCampaign.id === selectedCampaignId
+    ? { environment: checkpointEnvironment, ownerId: user.uid, campaignId: activeCampaign.id } as const : null;
+  const checkpointOwner = checkpointScope?.ownerId;
+  const pendingCheckpoint = checkpointScope ? loadPendingCheckpoint(window.sessionStorage, checkpointScope) : null;
+  const visibleCheckpoints = restrictedPilot
+    ? (pilotCheckpointList && pilotCheckpointList.ownerId === user?.uid ? pilotCheckpointList.values : [])
+    : checkpoints.map(summarizeCheckpoint);
+
+  useEffect(() => {
+    if (!user || !checkpointOwner) return;
+    const controller = new AbortController();
+    void user.getIdToken().then((token) => requestPilotCheckpoints(token, controller.signal)).then((values) => {
+      if (!controller.signal.aborted) setPilotCheckpointList({ ownerId: user.uid, values });
+    }).catch((error) => {
+      if (!controller.signal.aborted) setErrorState(formatPersistenceError(error, 'Falha ao listar checkpoints'));
+    });
+    return () => controller.abort();
+  }, [user, checkpointOwner, checkpointListVersion]);
 
   // Carrega a lista de campanhas da conta autenticada
   useEffect(() => {
@@ -296,6 +327,10 @@ export default function App() {
         activeCampaign.id !== selectedCampaignId || (restrictedPilot && !pilotCampaign) || isMutating) return false;
     if (readPendingTurn(user.uid, activeCampaign.id)) {
       setErrorState('Retome o turno pendente antes de enviar outra ação nesta campanha.');
+      return false;
+    }
+    if (pendingCheckpoint) {
+      setErrorState('Retome o checkpoint pendente antes de enviar outra ação.');
       return false;
     }
     const declaredAction = actionText.trim();
@@ -458,8 +493,55 @@ export default function App() {
     );
   };
 
+  const handlePilotCheckpoint = async (action: PilotCheckpointAction, errorTitle: string) => {
+    if (!checkpointScope || !activeCampaign || isMutating) return false;
+    if (pendingCheckpoint) {
+      setCheckpointMode(null);
+      return false;
+    }
+    if (readPendingTurn(checkpointScope.ownerId, activeCampaign.id)) {
+      setErrorState({ title: errorTitle, message: 'Resolva o turno pendente antes de usar um checkpoint.', retryable: false });
+      return false;
+    }
+    const request = { ...action, campaignId: activeCampaign.id, requestId: crypto.randomUUID(),
+      expectedRevision: activeCampaign.revision, baseTimelineId: getActiveTimelineId(activeCampaign) };
+    try {
+      savePendingCheckpoint(window.sessionStorage, checkpointScope, request);
+    } catch {
+      setErrorState('Não foi possível guardar o pedido de checkpoint para retomada.');
+      return false;
+    }
+    return submitPilotCheckpoint(request, errorTitle);
+  };
+
+  const submitPilotCheckpoint = async (request: NonNullable<typeof pendingCheckpoint>, errorTitle: string) => {
+    if (!checkpointScope || !user || isMutating ||
+        loadPendingCheckpoint(window.sessionStorage, checkpointScope)?.requestId !== request.requestId) return false;
+    return executeMutation(async () => {
+      try {
+        const result = await sendPilotCheckpoint(await user.getIdToken(), request);
+        if (result.checkpointId && Number.isSafeInteger(result.revision) && result.revision > request.expectedRevision &&
+            (request.action === 'save' ? result.timelineId === request.baseTimelineId :
+              result.checkpointId === request.checkpointId && result.timelineId && result.timelineId !== request.baseTimelineId)) {
+          clearPendingCheckpoint(window.sessionStorage, checkpointScope, request.requestId);
+          setCheckpointListVersion((version) => version + 1);
+          return;
+        }
+        throw new Error('Resposta de checkpoint não confirmada. Retome o pedido para consultar o recibo.');
+      } catch (error) {
+        if (error instanceof CheckpointRequestError && error.definitive) {
+          clearPendingCheckpoint(window.sessionStorage, checkpointScope, request.requestId);
+          setCheckpointListVersion((version) => version + 1);
+        }
+        setCheckpointMode(null);
+        throw error;
+      }
+    }, errorTitle, false);
+  };
+
   const handleSaveCheckpoint = async (label: string, note: string): Promise<boolean> => {
-    if (!activeCampaign || stagingFreixo) return false;
+    if (!activeCampaign || !checkpointsEnabled) return false;
+    if (restrictedPilot) return handlePilotCheckpoint({ action: 'save', label, note }, 'Falha ao salvar ponto de controle');
     const rule = buildCheckpointPayload(activeCampaign, inventory, npcs, label, note);
     if (!rule.ok) {
       setErrorState(rule.error);
@@ -480,8 +562,11 @@ export default function App() {
     );
   };
 
-  const handleRestoreCheckpoint = async (checkpoint: Checkpoint): Promise<boolean> => {
-    if (!activeCampaign || stagingFreixo) return false;
+  const handleRestoreCheckpoint = async (checkpointId: string): Promise<boolean> => {
+    if (!activeCampaign || !checkpointsEnabled) return false;
+    if (restrictedPilot) return handlePilotCheckpoint({ action: 'restore', checkpointId }, 'Falha ao carregar ponto de controle');
+    const checkpoint = checkpoints.find(({ id }) => id === checkpointId);
+    if (!checkpoint) return false;
     return executeMutation(
       () => restoreCheckpoint(activeCampaign, checkpoint, inventory, npcs),
       'Falha ao carregar ponto de controle',
@@ -549,14 +634,19 @@ export default function App() {
   return (
     <div className={(activeCampaign ? 'h-dvh overflow-hidden ' : 'min-h-screen ') + 'bg-[#0B0D12] text-[#EDE8DC] flex flex-col'}>
       {localFreixo && <p className="px-6 py-2 text-sm">Freixo local · Firebase emulado</p>}
-      {stagingFreixo && <p className="px-6 py-2 text-sm">Freixo de testes. Checkpoints e restauração indisponíveis nesta versão.</p>}
+      {stagingFreixo && <p className="px-6 py-2 text-sm">Freixo de testes.{!checkpointsEnabled && ' Checkpoints e restauração indisponíveis nesta versão.'}</p>}
+      {pendingCheckpoint && <div role="status" className="px-6 py-2 text-sm">
+        {pendingCheckpoint.action === 'save' ? 'Salvamento' : 'Restauração'} de checkpoint aguardando confirmação.{' '}
+        <button type="button" className="underline" disabled={isMutating}
+          onClick={() => void submitPilotCheckpoint(pendingCheckpoint, 'Falha ao retomar checkpoint')}>Retomar checkpoint</button>
+      </div>}
       <TopBar
         campaignName={activeCampaign?.name ?? null}
         syncState={syncState}
         userEmail={user.email}
         hasCampaign={Boolean(activeCampaign)}
-        onOpenSaveCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('save')}
-        onOpenLoadCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('load')}
+        onOpenSaveCheckpoint={checkpointsEnabled && !pendingCheckpoint ? () => setCheckpointMode('save') : undefined}
+        onOpenLoadCheckpoint={checkpointsEnabled && !pendingCheckpoint ? () => setCheckpointMode('load') : undefined}
         onOpenCampaigns={restrictedPilot ? undefined : () => setCampaignHubOpen(true)}
         onSignOut={() => void logout()}
       />
@@ -589,7 +679,7 @@ export default function App() {
           </div>
 
           <div className="flex items-center justify-between gap-2 text-xs">
-            {!stagingFreixo && <div className="flex items-center gap-2">
+            {checkpointsEnabled && !pendingCheckpoint && <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setCheckpointMode('save')}
@@ -747,11 +837,11 @@ export default function App() {
                     events={events}
                     eventStatuses={eventAudit.statusById}
                     supersededNarrative={narrativeAudit.superseded}
-                    checkpoints={checkpoints}
+                    checkpointCount={visibleCheckpoints.length}
                     isMutating={isMutating}
                     onAdvanceTime={stagingFreixo ? undefined : (mins) => void handleAdvanceTime(mins)}
-                    onOpenSaveCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('save')}
-                    onOpenLoadCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('load')}
+                    onOpenSaveCheckpoint={checkpointsEnabled && !pendingCheckpoint ? () => setCheckpointMode('save') : undefined}
+                    onOpenLoadCheckpoint={checkpointsEnabled && !pendingCheckpoint ? () => setCheckpointMode('load') : undefined}
                     onOpenCampaigns={restrictedPilot ? undefined : () => setCampaignHubOpen(true)}
                     onTestPersistenceError={showDiagnostics ? () => void handleTestPersistenceError() : undefined}
                   />
@@ -779,11 +869,11 @@ export default function App() {
         onDeleteCampaign={handleDeleteCampaign}
       />
 
-      {activeCampaign && !stagingFreixo && (
+      {activeCampaign && checkpointsEnabled && (
         <CheckpointModal
           mode={checkpointMode}
           campaign={activeCampaign}
-          checkpoints={checkpoints}
+          checkpoints={visibleCheckpoints}
           isMutating={isMutating}
           onClose={() => setCheckpointMode(null)}
           onSaveCheckpoint={handleSaveCheckpoint}
