@@ -46,4 +46,17 @@ test('envio normal usa o botão de ação e só oferece retomada quando a requis
   const pilot = renderToStaticMarkup(<NarrativeStage {...props} isMutating={false} automaticDuration />);
   assert.doesNotMatch(pilot, /Tempo gasto/);
   assert.ok(pilot.includes(formatWorldClock(campaign.worldTime)));
+  const discovery = renderToStaticMarkup(<NarrativeStage {...props} isMutating={false} automaticDuration
+    gameplayFeedback="Samuel não reconhece esse destino." scene={{
+      revision: campaign.revision, timelineId: 'tl_root', location: campaign.currentLocation,
+      exits: [{ id: 'well', label: 'poço' }], people: [{ id: 'teresa', name: 'Teresa', available: true }],
+      landmarks: [{ id: 'cupboard', name: 'armário' }],
+    }} />);
+  assert.match(discovery, /<details.*?<summary[^>]*>O que há aqui<\/summary>/);
+  assert.match(discovery, /Saídas:<\/dt> <dd[^>]*>poço/);
+  assert.match(discovery, /Pessoas:<\/dt> <dd[^>]*>Teresa/);
+  assert.match(discovery, /Pontos de interesse:<\/dt> <dd[^>]*>armário/);
+  assert.match(discovery, /role="status"[^>]*>Samuel não reconhece esse destino/);
+  assert.match(discovery, /<textarea[^>]+id="player-action-input"/);
+  assert.doesNotMatch(confirmed, /O que há aqui/);
 });

@@ -25,11 +25,11 @@ interface WorldSidebarProps {
   supersededNarrative?: NarrativeEntry[];
   checkpoints: Checkpoint[];
   isMutating: boolean;
-  onAdvanceTime: (minutes: number) => void;
-  onOpenSaveCheckpoint: () => void;
-  onOpenLoadCheckpoint: () => void;
-  onOpenCampaigns: () => void;
-  onTestPersistenceError: () => void;
+  onAdvanceTime?: (minutes: number) => void;
+  onOpenSaveCheckpoint?: () => void;
+  onOpenLoadCheckpoint?: () => void;
+  onOpenCampaigns?: () => void;
+  onTestPersistenceError?: () => void;
 }
 
 const EVENT_TYPE_LABELS: Record<GameEventType, string> = {
@@ -93,7 +93,7 @@ export function WorldSidebar({
             {worldTime.weekday} · {formatWorldDate(worldTime)}
           </p>
 
-          <div className="flex items-center gap-2 pt-1 border-t border-white/8">
+          {onAdvanceTime && <div className="flex items-center gap-2 pt-1 border-t border-white/8">
             <Clock className="w-3.5 h-3.5 text-[#9CA3AF] shrink-0" aria-hidden="true" />
             <button
               type="button"
@@ -111,12 +111,12 @@ export function WorldSidebar({
             >
               +1 hora
             </button>
-          </div>
+          </div>}
         </div>
       </section>
 
       {/* Botões explícitos de Salvar, Carregar e Acessar Campanhas */}
-      <section aria-labelledby="persistence-heading" className="space-y-3 border-t border-white/8 pt-5">
+      {onOpenSaveCheckpoint && onOpenLoadCheckpoint && <section aria-labelledby="persistence-heading" className="space-y-3 border-t border-white/8 pt-5">
         <div className="flex items-center justify-between gap-2">
           <h2
             id="persistence-heading"
@@ -151,15 +151,15 @@ export function WorldSidebar({
           </button>
         </div>
 
-        <button
+        {onOpenCampaigns && <button
           type="button"
           onClick={onOpenCampaigns}
           className="w-full py-2 px-3 min-h-[40px] inline-flex items-center justify-center gap-1.5 text-xs font-medium rounded-md bg-[#0E121A] border border-white/10 hover:border-[#D4AF37]/35 text-[#EDE8DC] transition-colors whitespace-nowrap cursor-pointer"
         >
           <FolderOpen className="w-3.5 h-3.5 text-[#D4AF37]" aria-hidden="true" />
           <span>Acessar Campanhas</span>
-        </button>
-      </section>
+        </button>}
+      </section>}
 
       {/* Registro de Eventos (Auditoria e Restauração) */}
       <section aria-labelledby="events-heading" className="space-y-3 border-t border-white/8 pt-5">
@@ -272,7 +272,7 @@ export function WorldSidebar({
         )}
 
         {/* Teste explícito de falha de salvamento para o critério de aceitação */}
-        <div className="pt-2 border-t border-white/8">
+        {onTestPersistenceError && <div className="pt-2 border-t border-white/8">
           <button
             type="button"
             disabled={isMutating}
@@ -282,7 +282,7 @@ export function WorldSidebar({
             <AlertCircle className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Testar Erro de Salvamento</span>
           </button>
-        </div>
+        </div>}
       </section>
     </aside>
   );

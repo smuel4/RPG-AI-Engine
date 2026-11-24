@@ -8,13 +8,16 @@ import { deleteApp, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { SERVER_PILOT_ID } from '../server/persistPilotTurn';
+import { selectOwnedCampaignId } from '../src/engine/pilotCampaign';
+import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import type { Campaign } from '../src/types/game';
 import { villageWell } from '../src/engine/echoArcEncounters';
+import { freixoWoodland } from '../src/world/freixo';
 import { freixoWoodWorkshop } from '../src/engine/npcIdentity';
 import { familyYard } from '../scripts/echoArcFreeTurn';
 import { familyKitchen } from '../scripts/echoArcContinuityFixture';
 import { advanceWorldTime } from '../src/engine/rulesEngine';
-import { NarratorRequestError, requestNarratorTurn } from '../src/services/narratorClient';
+import { NarratorRequestError, requestNarratorTurn, requestPilotScene } from '../src/services/narratorClient';
 import { freixoEmulatorPorts } from '../server/freixoEmulatorPorts.mjs';
 
 test('exame e atividade da bancada pela API local com Auth e Firestore emulados', async (t) => {
@@ -125,6 +128,30 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
       'inventory', 'pilotObjectLocations']
       .map(async (collection) => (await ref.collection(collection).get()).docs.map((doc) => [doc.id, doc.data()]))]);
     const initial = await snapshot();
+    const ordinary = createEchoArcBundle(owner.claims.uid).campaign;
+    const ordinaryRef = ref.parent.doc(ordinary.id);
+    await ordinaryRef.create(ordinary);
+    assert.equal(selectOwnedCampaignId([ordinary, seed], ordinary.id, true), ref.id);
+    await assert.rejects(requestNarratorTurn(owner.idToken, {
+      campaignId: ordinary.id, declaredAction: 'Vou ao quintal.', advanceMinutes: 10,
+      turn: { turnId: crypto.randomUUID(), expectedRevision: ordinary.revision,
+        baseTimelineId: ordinary.activeTimelineId ?? 'tl_root' },
+    }), { code: 'DEMO_CAMPAIGN_REQUIRED', status: 400 });
+    assert.deepEqual((await ordinaryRef.get()).data(), ordinary);
+    assert.deepEqual(await snapshot(), initial);
+    const readScene = () => requestPilotScene(owner.idToken, new AbortController().signal);
+    const kitchen = await readScene();
+    assert.equal(kitchen.location, familyKitchen);
+    assert.equal(kitchen.revision, seed.revision);
+    assert.equal(kitchen.timelineId, seed.activeTimelineId ?? 'tl_root');
+    assert.deepEqual(kitchen.people.map(({ name, available }) => [name, available]), [['Teresa', true]]);
+    assert.deepEqual(kitchen.landmarks.map(({ name }) => name), ['armário', 'bancada']);
+    assert.ok(kitchen.exits.some(({ id }) => id === villageWell));
+    assert.ok(!kitchen.exits.some(({ id }) => id === freixoWoodWorkshop));
+    assert.equal((await http(base + '/api/freixo/scene')).status, 401);
+    assert.equal((await http(base + '/api/freixo/scene', {
+      headers: { Authorization: 'Bearer ' + outsider.idToken },
+    })).status, 403);
     await assert.rejects(submit('Observo o que ele está fazendo.'), {
       code: 'PILOT_OBSERVATION_UNAVAILABLE',
       message: 'Indique o ambiente atual ou uma pessoa presente que você possa observar.',
@@ -145,6 +172,8 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     assert.equal((await henriqueRef.get()).data()?.location, freixoWoodWorkshop);
     assert.match((await routineRef.get()).data()?.activities
       .find(({ npcId }: { npcId: string }) => npcId === henrique.id)?.activity ?? '', activity);
+    assert.ok((await routineRef.get()).data()?.activities.some(({ npcId, location }: { npcId: string; location: string }) =>
+      npcId === kitchen.people[0].id && location === familyKitchen));
     const afterMove = await snapshot();
     assert.match(organized.result.narration, /ficou organizada/);
     assert.equal((await organized.send()).narration, organized.result.narration);
@@ -175,6 +204,16 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
     assert.equal((await state()).currentLocation, villageWell, 'A — o turno deve terminar no poço');
     assert.deepEqual((await state()).worldTime, advanceWorldTime(morning, 11), 'A — o deslocamento deve levar seis minutos');
     const before = await snapshot();
+    const well = await readScene();
+    assert.equal(well.location, villageWell);
+    assert.ok(well.revision > kitchen.revision);
+    assert.deepEqual(well.people.map(({ name }) => name), ['Lira']);
+    assert.ok(well.exits.some(({ id }) => id === familyYard));
+    assert.deepEqual(well.landmarks, []);
+    assert.ok(well.exits.some(({ id, label }) => id === freixoWoodland && label === 'bosque'));
+    await assert.rejects(submit('Vou ao castelo.'), (error) =>
+      error instanceof NarratorRequestError && error.gameplayFeedback &&
+      error.code === 'PILOT_TRAVEL_UNAVAILABLE' && /não reconhece esse destino/.test(error.message));
     for (const [action, code] of [['Examino a bancada.', 'PILOT_OBJECT_OUT_OF_REACH'],
       ['Examino aquele objeto.', 'PILOT_OBJECT_OUT_OF_REACH'], ['Examino o jarro.', 'PILOT_OBJECT_UNREGISTERED']]) {
       await assert.rejects(submit(action), { code });
@@ -444,6 +483,26 @@ test('exame e atividade da bancada pela API local com Auth e Firestore emulados'
       assert.equal((await open.send()).narration, 'O armário está aberto.');
       assert.deepEqual(await snapshot(), closed);
       assert.deepEqual((await reopenedRef.collection('npcRoutineState').doc(routineRef.id).get()).data()?.openObjects, []);
+      await submit('Vou ao poço.');
+      const beforeWoodland = await state();
+      const journey = await submit('Vou ao Bosque de Freixo.');
+      assert.match(journey.result.narration, /folhas secas/);
+      const woodland = await readScene();
+      assert.equal(woodland.location, freixoWoodland);
+      assert.equal(woodland.revision, beforeWoodland.revision + 1);
+      assert.equal(woodland.timelineId, well.timelineId);
+      assert.deepEqual(woodland.people, []);
+      assert.deepEqual(woodland.exits.map(({ id }) => id), [villageWell]);
+      assert.deepEqual(woodland.landmarks.map(({ name }) => name), ['marco de pedra']);
+      assert.deepEqual((await state()).worldTime, advanceWorldTime(beforeWoodland.worldTime, 5));
+      const afterArrival = await snapshot();
+      assert.equal((await journey.send()).narration, journey.result.narration);
+      assert.deepEqual(await snapshot(), afterArrival);
+      assert.match((await submit('Examino a pedra da trilha.')).result.narration, /marco de pedra coberto de musgo/);
+      assert.deepEqual((await state()).worldTime, advanceWorldTime(beforeWoodland.worldTime, 5));
+      await submit('Vou ao poço.');
+      assert.equal((await readScene()).location, villageWell);
+      assert.deepEqual((await state()).worldTime, advanceWorldTime(beforeWoodland.worldTime, 10));
     } finally {
       await deleteApp(reopened);
     }

@@ -3,19 +3,19 @@ import type { TurnIdentity } from '../src/engine/turnIdentity';
 
 const key = randomBytes(32);
 
-function signature(ownerId: string, turn: TurnIdentity, prefix: string) {
-  return createHmac('sha256', key).update(JSON.stringify([
+function signature(ownerId: string, turn: TurnIdentity, prefix: string, signingKey: Buffer) {
+  return createHmac('sha256', signingKey).update(JSON.stringify([
     ownerId, turn.campaignId, turn.turnId, turn.expectedRevision, turn.baseTimelineId, turn.advanceMinutes, prefix,
   ])).digest();
 }
 
-export function issuePilotClarification(ownerId: string, turn: TurnIdentity, prefix: string) {
-  return Buffer.from(prefix).toString('base64url') + '.' + signature(ownerId, turn, prefix).toString('base64url');
+export function issuePilotClarification(ownerId: string, turn: TurnIdentity, prefix: string, signingKey = key) {
+  return Buffer.from(prefix).toString('base64url') + '.' + signature(ownerId, turn, prefix, signingKey).toString('base64url');
 }
 
-export function readPilotClarification(ownerId: string, turn: TurnIdentity, token: unknown) {
+export function readPilotClarification(ownerId: string, turn: TurnIdentity, token: unknown, signingKey = key) {
   const parts = readClarificationParts(token);
-  if (parts && timingSafeEqual(parts.mac, signature(ownerId, turn, parts.prefix))) return parts.prefix;
+  if (parts && timingSafeEqual(parts.mac, signature(ownerId, turn, parts.prefix, signingKey))) return parts.prefix;
 }
 
 export function readClarificationParts(token: unknown) {

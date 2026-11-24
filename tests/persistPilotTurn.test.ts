@@ -5,7 +5,8 @@ import { persistPilotTurn, PilotTurnError, SERVER_PILOT_ID } from '../server/per
 import { issuePilotClarification, readPilotClarification } from '../server/pilotClarification';
 import { describePilotFeedback } from '../server/pilotFeedback';
 import { createEchoArcBundle } from '../src/engine/echoArcFixture';
-import { advanceWorldTime } from '../src/engine/rulesEngine';
+import { advanceWorldTime, buildCheckpointPayload, prepareCheckpointRestore } from '../src/engine/rulesEngine';
+import { readPilotScene } from '../server/pilotScene';
 import { turnDocumentIds } from '../src/engine/turnIdentity';
 import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
 import { freixoWoodWorkshop } from '../src/engine/npcIdentity';
@@ -16,8 +17,106 @@ import { claimsUnconfirmedPlayerConsequence } from '../server/pilotNarrativeInte
 import { familyKitchen } from '../scripts/echoArcContinuityFixture';
 import { familyYard, freixoPlayableCatalog } from '../scripts/echoArcFreeTurn';
 import { requestNarratorTurn } from '../src/services/narratorClient';
+import { freixoWoodland } from '../src/world/freixo';
 import { continuityCollections, continuitySecret, verifyFreixoContinuity,
   type ContinuitySnapshot } from '../scripts/freixoContinuitySession';
+
+test('Henrique oferece conversa na pausa, com replay e continuidade pelo corte do checkpoint', async () => {
+  const owner = 'dono';
+  const bundle = createEchoArcBundle(owner);
+  const campaign = { ...bundle.campaign, id: SERVER_PILOT_ID, currentLocation: familyYard,
+    worldTime: advanceWorldTime({ ...bundle.campaign.worldTime, hour: 11, minute: 29 }, 0) };
+  const henrique = { ...bundle.npcs[1], campaignId: campaign.id, location: freixoWoodWorkshop };
+  const path = 'campaigns/' + campaign.id;
+  const npcPath = path + '/npcs/' + henrique.id;
+  const docs = new Map<string, object>([[path, campaign], [npcPath, henrique]]);
+  const db = memoryFirestore(docs);
+  const state = () => docs.get(path) as typeof campaign;
+  const npc = () => docs.get(npcPath) as typeof henrique;
+  const next = (declaredAction: string) => ({ campaignId: campaign.id, turnId: crypto.randomUUID(),
+    baseTimelineId: state().activeTimelineId ?? 'tl_root', expectedRevision: state().revision, advanceMinutes: 10, declaredAction });
+  const fixed = async () => 'A luz ilumina as pedras.';
+  const noNarration = async () => assert.fail('A espera ou consulta factual dispensa o narrador.');
+  const send = (turn: ReturnType<typeof next>, narrate: Parameters<typeof persistPilotTurn>[4] = noNarration) =>
+    persistPilotTurn(db, freixoPlayableCatalog, owner, turn, narrate);
+  const cue = /Henrique faz um aceno do quintal/u;
+  const snapshot = () => structuredClone([...docs]);
+  const checkpoint = (label: string) => {
+    const built = buildCheckpointPayload(state(), [], [npc()], label, '');
+    assert.ok(built.ok);
+    return built.data.checkpoint;
+  };
+  const restore = (saved: ReturnType<typeof checkpoint>) => {
+    const restored = prepareCheckpointRestore(state(), saved, [], [npc()]);
+    assert.ok(restored.ok);
+    const plan = restored.data;
+    docs.set(path, { ...state(), ...plan.restoredState, revision: plan.nextRevision,
+      lastSequence: plan.nextLastSequence, activeTimelineId: plan.nextTimelineId, timelineLineage: plan.nextTimelineLineage });
+    docs.set(npcPath, { ...npc(), location: saved.npcsSnapshot[0].location });
+    docs.set(path + '/narrative/' + plan.narrativeEntry.id, plan.narrativeEntry);
+    docs.set(path + '/events/' + plan.event.id, plan.event);
+  };
+
+  const initial = snapshot();
+  assert.deepEqual((await readPilotScene(db, freixoPlayableCatalog, owner))?.people, []);
+  assert.deepEqual(snapshot(), initial);
+  for (const [location, hour, minute, holds] of [
+    [familyKitchen, 11, 29, []],
+    [familyYard, 13, 0, []],
+    [familyYard, 11, 29, [{ npcId: henrique.id, reason: 'commitment',
+      until: { ...campaign.worldTime, hour: 12, minute: 0 } }]],
+  ] as const) {
+    const fixture = new Map<string, object>([[path, { ...campaign, currentLocation: location,
+      worldTime: { ...campaign.worldTime, hour, minute } }], [npcPath, henrique],
+      [path + '/npcRoutineState/' + next('').baseTimelineId, { activities: [], observations: [], holds }]]);
+    const result = await persistPilotTurn(memoryFirestore(fixture), freixoPlayableCatalog, owner,
+      next('Espero seis minutos.'), noNarration);
+    assert.doesNotMatch(result.narration, cue);
+  }
+  const privateTurn = next('Vou ao quintal e converso com Henrique.');
+  const privateFixture = new Map<string, object>([
+    [path, { ...campaign, currentLocation: familyKitchen, worldTime: advanceWorldTime(campaign.worldTime, 6) }],
+    [npcPath, { ...henrique, location: familyYard }],
+  ]);
+  const privateResult = await persistPilotTurn(memoryFirestore(privateFixture), freixoPlayableCatalog, owner, privateTurn, fixed);
+  const privateIds = await turnDocumentIds(privateTurn);
+  assert.doesNotMatch(privateResult.narration, cue);
+  assert.equal((privateFixture.get(path + '/narrative/' + privateIds.engine) as { privateRecipientId: string })
+    .privateRecipientId, henrique.id);
+  assert.doesNotMatch((await send(next('Como chego ao poço?'))).narration, cue);
+  assert.deepEqual(state().worldTime, campaign.worldTime);
+  assert.equal(npc().location, freixoWoodWorkshop);
+  const before = checkpoint('Antes da pausa');
+  assert.doesNotMatch((await send(next('Espero um minuto.'))).narration, cue);
+  const trigger = next('Espero cinco minutos.');
+  const event = await send(trigger);
+  assert.match(event.narration, cue);
+  assert.equal(npc().location, familyYard);
+  assert.deepEqual(state().worldTime, advanceWorldTime(campaign.worldTime, 6));
+  const ids = await turnDocumentIds(trigger);
+  assert.equal((docs.get(path + '/narrative/' + ids.player) as { content: string }).content, trigger.declaredAction);
+  const response = docs.get(path + '/narrative/' + ids.engine) as { privateRecipientId?: string; content: string };
+  assert.equal(response.privateRecipientId, undefined);
+  assert.equal(response.content, event.narration);
+  assert.deepEqual(state().protagonist, campaign.protagonist);
+  assert.deepEqual(state().currency, campaign.currency);
+  assert.equal([...docs.keys()].some((key) => key.includes('/inventory/')), false);
+  const committed = snapshot();
+  assert.equal((await send(trigger)).narration, event.narration);
+  assert.deepEqual(snapshot(), committed);
+  const after = checkpoint('Depois da pausa');
+  assert.doesNotMatch((await send(next('Espero um minuto.'))).narration, cue);
+  assert.doesNotMatch((await send(next('Vou ao poço.'), fixed)).narration, cue);
+  restore(after);
+  assert.doesNotMatch((await send(next('Espero um minuto.'))).narration, cue);
+  restore(before);
+  assert.match((await send(next('Espero seis minutos.'))).narration, cue);
+  assert.doesNotMatch((await send(next('Henrique, o que você está fazendo?'))).narration, cue);
+  assert.doesNotMatch((await send(next('Converso com Henrique sobre a oficina.'), async (_campaign, _intent, scene) => {
+    assert.deepEqual(scene.npcs.map(({ id }) => id), [henrique.id]);
+    return 'Henrique escuta.';
+  })).narration, cue);
+});
 
 test('exploração distingue localização, consulta, conversa e destinos indisponíveis', async () => {
   const owner = 'dono';
@@ -40,13 +139,13 @@ test('exploração distingue localização, consulta, conversa e destinos indisp
   const factual = async () => assert.fail('Consulta factual chamou o narrador.');
   const start = state();
   await assert.rejects(send('Quero conversar com Lira.'), { code: 'PILOT_SPEECH_UNAVAILABLE', absentNpcName: 'Lira' });
-  await assert.rejects(send('Quero explorar o bosque.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'unknown-destination' });
+  await assert.rejects(send('Quero explorar o castelo.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'unknown-destination' });
   await assert.rejects(send('Vou ao poço ou à oficina.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'ambiguous-destination' });
   await assert.rejects(send('Vou ao poço.', factual, { ...catalog, routes: [] }),
     { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'unknown-route' });
   assert.equal(state(), start);
   assert.match((await send('Onde posso encontrar Lira?', factual)).narration, /nem confirmar onde/);
-  assert.match((await send('Será que existe um caminho para o bosque?', factual)).narration, /não reconhece/);
+  assert.match((await send('Será que existe um caminho para o castelo?', factual)).narration, /não reconhece/);
   assert.match((await send('Como chego ao poço?', factual)).narration, /caminho acessível.*6 min/);
   assert.equal(state().currentLocation, familyKitchen);
   assert.deepEqual(state().worldTime, start.worldTime);
@@ -77,8 +176,136 @@ test('exploração distingue localização, consulta, conversa e destinos indisp
   assert.deepEqual(structuredClone([...docs]), after);
   assert.equal(state().currentLocation, villageWell);
   assert.deepEqual(state().worldTime, advanceWorldTime(start.worldTime, 6));
-  docs.set(path, { ...state(), setting: 'A história local menciona o bosque.' });
-  await assert.rejects(send('Vou ao bosque.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'uncatalogued-destination' });
+  docs.set(path, { ...state(), setting: 'A história local menciona o castelo.' });
+  await assert.rejects(send('Vou ao castelo.'), { code: 'PILOT_TRAVEL_UNAVAILABLE', reason: 'uncatalogued-destination' });
+  const journey = { ...turn, turnId: crypto.randomUUID(), expectedRevision: state().revision,
+    declaredAction: 'Vou ao bosque da vila.' };
+  const arrived = await persistPilotTurn(db, catalog, owner, journey, async (_scene, _intent, present, _relations, history) => {
+    assert.deepEqual(present.npcs, []);
+    assert.ok(!JSON.stringify({ present, history }).includes(continuitySecret));
+    return 'Folhas secas cobrem o chão.';
+  });
+  assert.equal(state().currentLocation, freixoWoodland);
+  assert.deepEqual(state().worldTime, advanceWorldTime(start.worldTime, 11));
+  assert.equal((await persistPilotTurn(db, catalog, owner, journey, factual)).narration, arrived.narration);
+  assert.match((await send('Examino o marco.')).narration, /marco de pedra coberto de musgo/);
+  assert.deepEqual(state().worldTime, advanceWorldTime(start.worldTime, 11));
+  await assert.rejects(send('Pego o marco.'), { code: 'PILOT_OBJECT_FIXED' });
+  await send('Vou ao poço.');
+  assert.equal(state().currentLocation, villageWell);
+  assert.deepEqual(state().worldTime, advanceWorldTime(start.worldTime, 16));
+});
+
+test('baseline natural preserva intenção, local e relógio no piloto', async () => {
+  const owner = 'dono';
+  const { campaign: seed } = createEchoArcBundle(owner);
+  const campaign = { ...seed, id: SERVER_PILOT_ID, currentLocation: familyKitchen };
+  const path = 'campaigns/' + campaign.id;
+  const lira = createWellEncounterNpc(owner, campaign.id);
+  const corpus = [
+    ['executável', familyYard, 'Volto ao poço.', villageWell, 4],
+    ['executável', freixoWoodland, 'Quero retornar para o poço.', villageWell, 5],
+    ['executável', familyYard, 'Vou até a oficina.', freixoWoodWorkshop, 4],
+    ['executável', villageWell, 'Quero conversar com Lira.', villageWell, 0],
+    ['consulta', villageWell, 'Será que consigo ir ao bosque?', villageWell, 0],
+    ['executável', familyKitchen, 'Aguardo cinco minutos.', familyKitchen, 5],
+    ['executável', familyKitchen, 'Abro o armário.', familyKitchen, 0],
+    ['executável', freixoWoodland, 'Examino o marco.', freixoWoodland, 0],
+    ['contextual', freixoWoodland, 'Examino aquele marco.', freixoWoodland, 0],
+    ['composta', familyKitchen, 'Vou ao poço e converso com Lira.', villageWell, 6],
+    ['impedida', familyKitchen, 'Quero conversar com Lira.', 'PILOT_SPEECH_UNAVAILABLE'],
+    ['impedida', familyKitchen, 'Vou ao bosque e converso com Lira.', 'PILOT_SPEECH_UNAVAILABLE'],
+    ['fora do catálogo', familyKitchen, 'Vou ao castelo.', 'PILOT_TRAVEL_UNAVAILABLE', 'unknown-destination'],
+    ['fora do catálogo', familyKitchen, 'Pego o cetro.', 'PILOT_OBJECT_UNREGISTERED'],
+    ['ambígua', familyKitchen, 'Vou ao poço ou à oficina.', 'PILOT_TRAVEL_UNAVAILABLE', 'ambiguous-destination'],
+    ['fora da mecânica', familyKitchen, 'Lanço uma magia.', 'PILOT_ACTION_UNSUPPORTED'],
+    ['não reconhecida', familyYard, 'Bato perna rumo ao poço.', 'PILOT_ACTION_UNSUPPORTED'],
+    ['negativa', familyKitchen, 'Não quero sair daqui.', 'PILOT_ACTION_UNSUPPORTED'],
+    ['hipótese', familyKitchen, 'Se eu voltar ao poço.', 'PILOT_ACTION_UNSUPPORTED'],
+  ] as const;
+  for (const [category, location, declaredAction, expected, detail] of corpus) {
+    const docs = new Map<string, object>([[path, { ...campaign, currentLocation: location }], [path + '/npcs/' + lira.id, lira]]);
+    const db = memoryFirestore(docs);
+    const current = () => docs.get(path) as typeof campaign;
+    const send = async (action: string) => persistPilotTurn(db, freixoPlayableCatalog, owner, {
+      campaignId: campaign.id, turnId: crypto.randomUUID(), baseTimelineId: current().activeTimelineId ?? 'tl_root',
+      expectedRevision: current().revision, advanceMinutes: 10, declaredAction: action,
+    }, async () => 'A luz ilumina as pedras.');
+    if (category === 'contextual') await send('Examino o marco.');
+    const before = structuredClone([...docs]);
+    const initialTime = current().worldTime;
+    if (typeof detail === 'number') {
+      const result = await send(declaredAction);
+      assert.equal(current().currentLocation, expected, declaredAction);
+      assert.deepEqual(current().worldTime, advanceWorldTime(initialTime, detail), declaredAction);
+      if (category === 'consulta') assert.match(result.narration, /5 min/);
+      if (category === 'contextual') assert.match(result.narration, /marco de pedra coberto de musgo/);
+    } else {
+      await assert.rejects(send(declaredAction), { code: expected, ...(detail ? { reason: detail } : {}) }, declaredAction);
+      assert.deepEqual([...docs], before, declaredAction);
+    }
+  }
+});
+
+test('perguntas e hipóteses não autorizam efeitos antes da confirmação do jogador', async () => {
+  const owner = 'dono';
+  const { campaign: seed, npcs: [teresa, henrique] } = createEchoArcBundle(owner);
+  const campaign = { ...seed, id: SERVER_PILOT_ID, currentLocation: familyKitchen };
+  const path = 'campaigns/' + campaign.id;
+  const lira = createWellEncounterNpc(owner, campaign.id);
+  const docs = new Map<string, object>([[path, campaign],
+    ...[teresa, henrique, lira].map((npc) => [path + '/npcs/' + npc.id, { ...npc, campaignId: campaign.id,
+      location: npc === teresa ? familyKitchen : npc === henrique ? freixoWoodWorkshop : villageWell }] as const)]);
+  const db = memoryFirestore(docs);
+  const state = () => docs.get(path) as typeof campaign;
+  const noNarration = async () => assert.fail('Consulta factual ou recusa chamou o narrador.');
+  const send = (declaredAction: string, narrate: Parameters<typeof persistPilotTurn>[4] = noNarration) =>
+    persistPilotTurn(db, freixoPlayableCatalog, owner, {
+      campaignId: campaign.id, turnId: crypto.randomUUID(), baseTimelineId: state().activeTimelineId ?? 'tl_root',
+      expectedRevision: state().revision, advanceMinutes: 10, declaredAction,
+    }, narrate);
+  const before = structuredClone([...docs]);
+  for (const text of [
+    'Pego o bloco?', 'Posso pegar o bloco?', 'Abro o armário?', 'Vou ao poço?', 'Converso com Teresa?',
+    'Poderia guardar o bloco no armário', 'Espero dez minutos？!', 'Como você está?', 'Queria saber como está a vila?',
+  ]) await assert.rejects(send(text), { code: 'PILOT_INTENT_CLARIFICATION' }, text);
+  for (const text of [
+    'Talvez eu pegue o bloco.', 'E se eu fosse ao bosque?', 'Não quero pegar o bloco.', 'Eu talvez espere um pouco?',
+  ]) await assert.rejects(send(text), { code: 'PILOT_ACTION_UNSUPPORTED' }, text);
+  await assert.rejects(send('Vou ao poço; posso pegar o bloco?'), { code: 'PILOT_INTENT_CLARIFICATION', step: 2 });
+  await assert.rejects(send('Posso pegar o bloco?; vou ao poço.'), { code: 'PILOT_INTENT_CLARIFICATION', step: 1 });
+  await assert.rejects(send('Vou ao poço; dá para chegar ao bosque?'), { code: 'PILOT_SEQUENCE_NEEDS_REPLY', step: 2 });
+  assert.deepEqual(structuredClone([...docs]), before);
+
+  assert.match((await send('Dá para chegar ao poço?')).narration, /caminho acessível.*6 min/u);
+  assert.match((await send('É possível chegar à oficina por aqui?')).narration, /caminho acessível.*6 min/u);
+  assert.match((await send('Onde está Henrique?')).narration, /nem confirmar onde/u);
+  assert.equal(state().currentLocation, familyKitchen);
+  assert.deepEqual(state().worldTime, campaign.worldTime);
+  assert.equal(docs.has(path + '/inventory/demo-bloco-madeira'), false);
+  assert.equal([...docs.values()].some((doc) => 'privateRecipientId' in doc), false);
+
+  let addressed: string | undefined;
+  const controlledSpeech = async (_scene: unknown, _intent: string, present: { npcs: { name: string }[] }) => {
+    addressed = present.npcs[0]?.name;
+    return 'A conversa segue em tom tranquilo.';
+  };
+  await send('Converso com Teresa.', controlledSpeech);
+  assert.equal(addressed, 'Teresa');
+  await send('Pergunto a Teresa se posso sair.', controlledSpeech);
+  await send('Pego o bloco.');
+  assert.equal(docs.has(path + '/inventory/demo-bloco-madeira'), true);
+  await send('Vou ao poço.', async () => 'A luz ilumina as pedras.');
+  assert.equal(state().currentLocation, villageWell);
+  await send('Converso com Lira sobre o poço.', controlledSpeech);
+  assert.equal(addressed, 'Lira');
+  await send('Vou até a oficina.', async () => 'A luz ilumina a oficina.');
+  await send("Digo a Henrique: 'Posso ajudar na oficina?'", controlledSpeech);
+  const explicit = [...docs.values()].find((doc) => 'plan' in doc &&
+    JSON.stringify(doc.plan).includes("'Posso ajudar na oficina?'"));
+  assert.ok(explicit);
+  assert.equal(state().currentLocation, freixoWoodWorkshop);
+  assert.deepEqual(state().worldTime, advanceWorldTime(campaign.worldTime, 14));
 });
 
 test('oferta de Teresa é visível, privada e responde uma vez à decisão de Samuel', async (t) => {

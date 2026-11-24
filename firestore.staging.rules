@@ -1,0 +1,20 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function invited() {
+      return request.auth != null && request.auth.token.email_verified == true &&
+        get(/databases/$(database)/documents/stagingAccess/pilot).data.ownerId == request.auth.uid;
+    }
+
+    match /campaigns/echo-arc-server-pilot {
+      allow get: if invited() && resource.data.ownerId == request.auth.uid;
+
+      match /{collection}/{id} {
+        allow read: if collection in ['inventory', 'npcs', 'narrative', 'events'] &&
+          invited() &&
+          get(/databases/$(database)/documents/campaigns/echo-arc-server-pilot).data.ownerId == request.auth.uid &&
+          resource.data.ownerId == request.auth.uid;
+      }
+    }
+  }
+}

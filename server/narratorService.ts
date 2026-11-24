@@ -38,7 +38,7 @@ export function selectNarratorMode(
 }
 
 export interface CampaignNarrationInput extends Pick<NarratorMemoryInput,
-  'sceneKnowledge' | 'npcActivities' | 'npcMemories' | 'npcRelationships'> {
+  'sceneKnowledge' | 'npcActivities' | 'npcMemories' | 'npcRelationships' | 'publicOnly'> {
   campaign: Campaign;
   inventory: InventoryItem[];
   npcs: NpcRecord[];

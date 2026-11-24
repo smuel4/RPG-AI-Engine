@@ -1,12 +1,12 @@
-﻿import { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FolderPlus, Sparkles } from 'lucide-react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
 import { useAuth } from './hooks/useAuth';
 import { DevAuthProbe } from './components/DevAuthProbe';
 import {
   buildCheckpointPayload,
   classifyEventsForAudit,
   classifyNarrativeEntriesForAudit,
+  getActiveTimelineId,
   processCurrencyMutation,
   processInventoryMutation,
   processPlayerAction,
@@ -33,10 +33,12 @@ import {
   subscribeUserCampaigns,
   testPersistenceFailure,
 } from './services/campaignRepository';
-import { NarratorRequestError, requestNarratorTurn } from './services/narratorClient';
+import { NarratorRequestError, requestNarratorTurn, requestPilotScene } from './services/narratorClient';
+import type { PilotScene } from './types/game';
 import { clearPendingTurn, loadPendingTurn, releaseRejectedPilotTurn, savePendingTurn, type PendingTurn } from './services/pendingTurn';
 import { checkTurnRevision } from './engine/turnIdentity';
-import { auth, formatPersistenceError, localFreixo } from './services/firebaseClient';
+import { selectOwnedCampaignId, SERVER_PILOT_ID } from './engine/pilotCampaign';
+import { formatPersistenceError, localFreixo, stagingFreixo } from './services/firebaseClient';
 import type {
   Campaign,
   Checkpoint,
@@ -57,6 +59,8 @@ import { NarrativeStage } from './components/NarrativeStage';
 import { WorldSidebar } from './components/WorldSidebar';
 import { CampaignHubModal } from './components/CampaignHubModal';
 import { CheckpointModal } from './components/CheckpointModal';
+
+const restrictedPilot = localFreixo || stagingFreixo;
 
 type MobileTab = 'narrative' | 'character' | 'world';
 
@@ -86,16 +90,36 @@ function readPendingTurn(ownerId: string, campaignId: string): PendingTurn | nul
 }
 
 export default function App() {
-  const { user, loading: authLoading, authError, signInWithGoogle, logout, clearAuthError } =
+  const { user, loading: authLoading, authError, signInWithGoogle, signInWithLocalAccount, logout, clearAuthError } =
     useAuth();
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [campaignsLoaded, setCampaignsLoaded] = useState(false);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(() =>
-    readCampaignIdFromUrl(),
+    restrictedPilot ? null : readCampaignIdFromUrl(),
   );
 
   const [activeCampaign, setActiveCampaign] = useState<Campaign | null>(null);
+  const [sceneSnapshot, setSceneSnapshot] = useState<{ ownerId: string; scene: PilotScene } | null>(null);
+  const pilotCampaign = restrictedPilot && activeCampaign?.id === SERVER_PILOT_ID;
+  const pilotRevision = pilotCampaign ? activeCampaign.revision : undefined;
+  const pilotTimeline = pilotCampaign ? getActiveTimelineId(activeCampaign) : undefined;
+  const scene = sceneSnapshot && sceneSnapshot.ownerId === user?.uid &&
+    sceneSnapshot.scene.revision === pilotRevision && sceneSnapshot.scene.timelineId === pilotTimeline &&
+    sceneSnapshot.scene.location === activeCampaign?.currentLocation ? sceneSnapshot.scene : undefined;
+  const showDiagnostics = import.meta.env.DEV && !restrictedPilot;
+
+  useEffect(() => {
+    if (!user || pilotRevision === undefined) return;
+    const controller = new AbortController();
+    void user.getIdToken().then((token) => requestPilotScene(token, controller.signal))
+      .then((scene) => {
+        if (!controller.signal.aborted) setSceneSnapshot({ ownerId: user.uid, scene });
+      }).catch(() => {
+        if (!controller.signal.aborted) setSceneSnapshot(null);
+      });
+    return () => controller.abort();
+  }, [user, pilotRevision, pilotTimeline]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [npcs, setNpcs] = useState<NpcRecord[]>([]);
   const [narrative, setNarrative] = useState<NarrativeEntry[]>([]);
@@ -139,9 +163,8 @@ export default function App() {
         setCampaigns(list);
         setCampaignsLoaded(true);
         setSelectedCampaignId((prev) => {
-          if (prev && list.some((c) => c.id === prev)) return prev;
-          const next = list[0]?.id ?? null;
-          writeCampaignIdToUrl(next);
+          const next = selectOwnedCampaignId(list, prev, restrictedPilot);
+          if (restrictedPilot || next !== prev) writeCampaignIdToUrl(next);
           return next;
         });
       },
@@ -270,7 +293,7 @@ export default function App() {
     advanceMinutes: number,
   ): Promise<boolean> => {
     if (!activeCampaign || !user?.emailVerified || activeCampaign.ownerId !== user.uid ||
-        activeCampaign.id !== selectedCampaignId || isMutating) return false;
+        activeCampaign.id !== selectedCampaignId || (restrictedPilot && !pilotCampaign) || isMutating) return false;
     if (readPendingTurn(user.uid, activeCampaign.id)) {
       setErrorState('Retome o turno pendente antes de enviar outra ação nesta campanha.');
       return false;
@@ -301,7 +324,8 @@ export default function App() {
 
   const submitPlayerTurn = async (identity: PendingTurn): Promise<boolean> => {
     if (!activeCampaign || !user?.emailVerified || activeCampaign.ownerId !== user.uid ||
-        activeCampaign.id !== identity.campaignId || selectedCampaignId !== identity.campaignId || isMutating ||
+        activeCampaign.id !== identity.campaignId || selectedCampaignId !== identity.campaignId ||
+        (restrictedPilot && !pilotCampaign) || isMutating ||
         readPendingTurn(user.uid, identity.campaignId)?.turnId !== identity.turnId) return false;
     const { declaredAction: actionText, advanceMinutes } = identity;
     setGameplayFeedback(null);
@@ -324,6 +348,7 @@ export default function App() {
         if (identity.clarificationToken) setClarification(null);
         return;
       }
+      if (restrictedPilot) throw new Error('O servidor do piloto não confirmou a gravação autoritativa do turno.');
       if (!checkTurnRevision(identity, activeCampaign)) {
         throw new Error('O estado exibido da campanha mudou. Aguarde a sincronização antes de retomar o turno.');
       }
@@ -352,7 +377,7 @@ export default function App() {
       );
       clearPendingTurn(window.sessionStorage, user.uid, identity);
     }, 'Falha ao registrar ação narrada', false, (error) => {
-      if (localFreixo && releaseRejectedPilotTurn(window.sessionStorage, user.uid, identity, error)) {
+      if (restrictedPilot && releaseRejectedPilotTurn(window.sessionStorage, user.uid, identity, error)) {
         setConflictingTurnId(null);
         setSyncState('synced');
         const clarificationToken = error.clarificationToken ?? identity.clarificationToken;
@@ -384,7 +409,7 @@ export default function App() {
         setConflictingTurnId(identity.turnId);
         return { title: 'Conflito de turno', message: 'O estado da campanha mudou. Confira o histórico antes de descartar a tentativa local.', retryable: false };
       }
-      if (!localFreixo) return formatPersistenceError(error, 'Falha ao registrar ação narrada');
+      if (!restrictedPilot) return formatPersistenceError(error, 'Falha ao registrar ação narrada');
       return { title: 'Confirmação indisponível', message: 'Não foi possível verificar o resultado. Use Retomar turno para consultar ou reenviar a mesma ação.', retryable: false };
     }, false);
   };
@@ -392,7 +417,7 @@ export default function App() {
   const handleInventoryMutation = async (
     command: InventoryMutationCommand,
   ): Promise<boolean> => {
-    if (!activeCampaign) return false;
+    if (!activeCampaign || stagingFreixo) return false;
     const rule = processInventoryMutation(activeCampaign, inventory, command);
     if (!rule.ok) {
       setErrorState(rule.error);
@@ -406,7 +431,7 @@ export default function App() {
   };
 
   const handleCurrencyMutation = async (delta: Partial<Currency>) => {
-    if (!activeCampaign) return;
+    if (!activeCampaign || restrictedPilot) return;
     const rule = processCurrencyMutation(activeCampaign, delta);
     if (!rule.ok) {
       setErrorState(rule.error);
@@ -420,7 +445,7 @@ export default function App() {
   };
 
   const handleAdvanceTime = async (minutes: number) => {
-    if (!activeCampaign) return;
+    if (!activeCampaign || stagingFreixo) return;
     const rule = processTimeAdvance(activeCampaign, minutes);
     if (!rule.ok) {
       setErrorState(rule.error);
@@ -434,7 +459,7 @@ export default function App() {
   };
 
   const handleSaveCheckpoint = async (label: string, note: string): Promise<boolean> => {
-    if (!activeCampaign) return false;
+    if (!activeCampaign || stagingFreixo) return false;
     const rule = buildCheckpointPayload(activeCampaign, inventory, npcs, label, note);
     if (!rule.ok) {
       setErrorState(rule.error);
@@ -456,7 +481,7 @@ export default function App() {
   };
 
   const handleRestoreCheckpoint = async (checkpoint: Checkpoint): Promise<boolean> => {
-    if (!activeCampaign) return false;
+    if (!activeCampaign || stagingFreixo) return false;
     return executeMutation(
       () => restoreCheckpoint(activeCampaign, checkpoint, inventory, npcs),
       'Falha ao carregar ponto de controle',
@@ -464,6 +489,7 @@ export default function App() {
   };
 
   const handleTestPersistenceError = async () => {
+    if (!showDiagnostics) return;
     setErrorState(null);
     setLastFailedAction(null);
     setIsMutating(true);
@@ -498,13 +524,14 @@ export default function App() {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
           setErrorState(null);
-          void signInWithEmailAndPassword(auth, String(form.get('email')), String(form.get('password')))
-            .catch(() => setErrorState('Use a conta local exibida no PowerShell.'));
+          void signInWithLocalAccount(String(form.get('email')), String(form.get('password')));
         }}>
           <h1 className="text-xl">Freixo local</h1>
           <label>E-mail local<input required name="email" type="email" className="block w-full border p-2" /></label>
           <label>Senha local<input required name="password" type="password" className="block w-full border p-2" /></label>
-          {typeof errorState === 'string' && <p role="alert">{errorState}</p>}
+          {(authError || errorState) && <p role="alert">
+            {authError ?? (typeof errorState === 'string' ? errorState : errorState?.message)}
+          </p>}
           <button className="border p-2" type="submit">Entrar no piloto</button>
         </form>
       </main>
@@ -522,14 +549,15 @@ export default function App() {
   return (
     <div className={(activeCampaign ? 'h-dvh overflow-hidden ' : 'min-h-screen ') + 'bg-[#0B0D12] text-[#EDE8DC] flex flex-col'}>
       {localFreixo && <p className="px-6 py-2 text-sm">Freixo local · Firebase emulado</p>}
+      {stagingFreixo && <p className="px-6 py-2 text-sm">Freixo de testes. Checkpoints e restauração indisponíveis nesta versão.</p>}
       <TopBar
         campaignName={activeCampaign?.name ?? null}
         syncState={syncState}
         userEmail={user.email}
         hasCampaign={Boolean(activeCampaign)}
-        onOpenSaveCheckpoint={() => setCheckpointMode('save')}
-        onOpenLoadCheckpoint={() => setCheckpointMode('load')}
-        onOpenCampaigns={() => setCampaignHubOpen(true)}
+        onOpenSaveCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('save')}
+        onOpenLoadCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('load')}
+        onOpenCampaigns={restrictedPilot ? undefined : () => setCampaignHubOpen(true)}
         onSignOut={() => void logout()}
       />
 
@@ -561,7 +589,7 @@ export default function App() {
           </div>
 
           <div className="flex items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2">
+            {!stagingFreixo && <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setCheckpointMode('save')}
@@ -576,7 +604,7 @@ export default function App() {
               >
                 Carregar
               </button>
-            </div>
+            </div>}
             <button
               type="button"
               onClick={() => void logout()}
@@ -603,6 +631,15 @@ export default function App() {
         {!campaignsLoaded ? (
           <div className="py-20 text-center text-sm text-[#B7B2A6]">
             Carregando campanhas persistidas no Cloud Firestore...
+          </div>
+        ) : !activeCampaign && restrictedPilot ? (
+          <div className="py-20 text-center text-sm text-[#B7B2A6]">
+            {selectedCampaignId ? <p>Abrindo a campanha piloto de Freixo...</p> : (
+              <>
+                <p>{stagingFreixo ? 'Campanha piloto indisponível nesta conta. Use a conta autorizada para staging.' : 'Campanha piloto indisponível nesta conta. Entre com a conta local exibida no PowerShell.'}</p>
+                <button type="button" onClick={() => void logout()} className="mt-3 underline">Trocar conta</button>
+              </>
+            )}
           </div>
         ) : !activeCampaign ? (
           <div className="max-w-2xl mx-auto my-10 bg-[#121620] border border-[#D4AF37]/20 rounded-xl p-8 space-y-6">
@@ -658,11 +695,11 @@ export default function App() {
                     campaign={activeCampaign}
                     npcs={npcs}
                     isMutating={isMutating}
-                    onAdjustCurrency={(delta) => void handleCurrencyMutation(delta)}
+                    onAdjustCurrency={restrictedPilot ? undefined : (delta) => void handleCurrencyMutation(delta)}
                   />
                   <InventoryPanel
                     items={inventory}
-                    readOnly={localFreixo}
+                    readOnly={restrictedPilot}
                     isArchived={activeCampaign.status === 'archived'}
                     isMutating={isMutating}
                     onMutateInventory={handleInventoryMutation}
@@ -674,7 +711,8 @@ export default function App() {
                   className={'order-last min-h-0 lg:order-none ' + (mobileTab === 'narrative' ? 'flex-1' : 'shrink-0')}
                 >
                   <NarrativeStage
-                    automaticDuration={localFreixo}
+                    scene={scene}
+                    automaticDuration={restrictedPilot}
                     key={activeCampaign.id}
                     campaign={activeCampaign}
                     entries={narrativeAudit.active}
@@ -692,7 +730,7 @@ export default function App() {
                     gameplayFeedback={gameplayFeedback?.ownerId === user?.uid &&
                       gameplayFeedback?.campaignId === activeCampaign.id ? gameplayFeedback.message : undefined}
                     onCancelClarification={() => setClarification(null)}
-                    confirmedAction={localFreixo ? eventAudit.active.find((event) =>
+                    confirmedAction={restrictedPilot ? eventAudit.active.find((event) =>
                       event.type === 'PLAYER_ACTION' && event.sequence === activeCampaign.lastSequence) : undefined}
                     onSubmitAction={handlePlayerAction}
                   />
@@ -711,11 +749,11 @@ export default function App() {
                     supersededNarrative={narrativeAudit.superseded}
                     checkpoints={checkpoints}
                     isMutating={isMutating}
-                    onAdvanceTime={(mins) => void handleAdvanceTime(mins)}
-                    onOpenSaveCheckpoint={() => setCheckpointMode('save')}
-                    onOpenLoadCheckpoint={() => setCheckpointMode('load')}
-                    onOpenCampaigns={() => setCampaignHubOpen(true)}
-                    onTestPersistenceError={() => void handleTestPersistenceError()}
+                    onAdvanceTime={stagingFreixo ? undefined : (mins) => void handleAdvanceTime(mins)}
+                    onOpenSaveCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('save')}
+                    onOpenLoadCheckpoint={stagingFreixo ? undefined : () => setCheckpointMode('load')}
+                    onOpenCampaigns={restrictedPilot ? undefined : () => setCampaignHubOpen(true)}
+                    onTestPersistenceError={showDiagnostics ? () => void handleTestPersistenceError() : undefined}
                   />
                 </div>
               </div>
@@ -724,10 +762,10 @@ export default function App() {
         )}
       </main>
 
-      <DevAuthProbe user={user} campaignId={activeCampaign?.id ?? null} />
+      {showDiagnostics && <DevAuthProbe user={user} campaignId={activeCampaign?.id ?? null} />}
 
       <CampaignHubModal
-        isOpen={campaignHubOpen}
+        isOpen={!restrictedPilot && campaignHubOpen}
         campaigns={campaigns}
         activeCampaignId={selectedCampaignId}
         isMutating={isMutating}
@@ -741,7 +779,7 @@ export default function App() {
         onDeleteCampaign={handleDeleteCampaign}
       />
 
-      {activeCampaign && (
+      {activeCampaign && !stagingFreixo && (
         <CheckpointModal
           mode={checkpointMode}
           campaign={activeCampaign}

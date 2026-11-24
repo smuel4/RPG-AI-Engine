@@ -2,7 +2,7 @@ import type { Firestore } from 'firebase-admin/firestore';
 
 export function memoryFirestore(docs: Map<string, object>) {
   const collection = (parent: string) => ({
-    doc: (id: string) => ({ path: parent + '/' + id, collection: (name: string) => collection(parent + '/' + id + '/' + name) }),
+    doc: (id: string) => ({ id, path: parent + '/' + id, collection: (name: string) => collection(parent + '/' + id + '/' + name) }),
     where: () => ({ limit: () => ({ parent }) }),
     orderBy: () => ({ limit: () => ({ parent }) }),
   });

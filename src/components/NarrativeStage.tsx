@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Send } from 'lucide-react';
 import { formatWorldClock } from '../engine/constants';
-import type { Campaign, GameEvent, NarrativeEntry } from '../types/game';
+import type { Campaign, GameEvent, NarrativeEntry, PilotScene } from '../types/game';
 
 interface NarrativeStageProps {
   campaign: Campaign;
@@ -15,6 +15,7 @@ interface NarrativeStageProps {
   onDiscardPending?: () => void;
   clarification?: string;
   gameplayFeedback?: string;
+  scene?: PilotScene;
   onCancelClarification?: () => void;
   confirmedAction?: GameEvent;
   onSubmitAction: (actionText: string, advanceMinutes: number) => Promise<boolean>;
@@ -38,6 +39,7 @@ export function NarrativeStage({
   onDiscardPending,
   clarification,
   gameplayFeedback,
+  scene,
   onCancelClarification,
   confirmedAction,
   onSubmitAction,
@@ -220,6 +222,23 @@ export function NarrativeStage({
           </div>
         )}
 
+        {scene && (
+          <details className="text-sm text-[#B7B2A6]">
+            <summary className="cursor-pointer text-[#F6E8B1]">O que há aqui</summary>
+            <dl className="mt-1 space-y-1 break-words">
+              <div><dt className="inline font-semibold">Local:</dt>{' '}<dd className="inline">{scene.location}</dd></div>
+              {scene.exits.length > 0 && (
+                <div><dt className="inline font-semibold">Saídas:</dt>{' '}<dd className="inline">{scene.exits.map(({ label }) => label).join(', ')}</dd></div>
+              )}
+              {scene.people.length > 0 && (
+                <div><dt className="inline font-semibold">Pessoas:</dt>{' '}<dd className="inline">{scene.people.map(({ name, available }) => available ? name : name + ' (ocupado no momento)').join(', ')}</dd></div>
+              )}
+              {scene.landmarks.length > 0 && (
+                <div><dt className="inline font-semibold">Pontos de interesse:</dt>{' '}<dd className="inline">{scene.landmarks.map(({ name }) => name).join(', ')}</dd></div>
+              )}
+            </dl>
+          </details>
+        )}
         <div className="flex gap-2">
           <textarea
             id="player-action-input"

@@ -1,6 +1,7 @@
 import type { PilotTurnError } from './persistPilotTurn';
 
 const gameplayMessages: ReadonlyMap<string, string> = new Map([
+  ['PILOT_INTENT_CLARIFICATION', 'Samuel quer realizar a ação, fazer uma consulta ou falar com alguém? Envie a intenção de forma direta.'],
   ['PILOT_SPEECH_UNAVAILABLE', 'Com quem Samuel quer conversar? Indique uma pessoa presente.'],
   ['PILOT_BRIDGE_OFFER_UNAVAILABLE', 'Samuel só pode responder a uma oferta pendente com quem a fez presente.'],
   ['PILOT_FACTUAL_NPC_OCCUPIED', 'Essa pessoa está ocupada agora. Samuel pode perguntar em outro momento.'],

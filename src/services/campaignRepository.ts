@@ -38,7 +38,9 @@ import {
   extractFirestoreContext,
   type CheckpointTransactionPort,
 } from './checkpointTransaction';
-import { OperationType, auth, db, handleFirestoreError } from './firebaseClient';
+import { OperationType, auth, db, handleFirestoreError, localFreixo, stagingFreixo } from './firebaseClient';
+import { SERVER_PILOT_ID } from '../engine/pilotCampaign';
+import { confirmLocalPilotSession } from './localPilotAuth';
 
 function toOperationType(op: string): OperationType {
   switch (op) {
@@ -75,7 +77,8 @@ async function ensureVerifiedAuthUser(expectedOwnerId?: string): Promise<string>
       `Divergência de identidade: UID autenticado (${user.uid}) diferente do ownerId (${expectedOwnerId}).`,
     );
   }
-  await user.getIdToken();
+  if (localFreixo) await confirmLocalPilotSession(auth, user);
+  else await user.getIdToken();
   return user.uid;
 }
 
@@ -85,6 +88,12 @@ export function subscribeUserCampaigns(
   onError: (err: unknown) => void,
 ): Unsubscribe {
   const path = 'campaigns';
+  if (stagingFreixo) {
+    return onSnapshot(doc(db, path, SERVER_PILOT_ID), (snapshot) => {
+      const campaign = snapshot.data() as Campaign | undefined;
+      onData(campaign?.ownerId === uid && campaign.id === SERVER_PILOT_ID ? [campaign] : []);
+    }, onError);
+  }
   const q = query(collection(db, path), where('ownerId', '==', uid));
 
   return onSnapshot(
@@ -177,7 +186,8 @@ export function subscribeCampaignDetails(
     (err) => emitError(err, OperationType.LIST, `${basePath}/events`),
   );
 
-  const unsubCheckpoints = onSnapshot(
+  if (stagingFreixo) callbacks.onCheckpoints([]);
+  const unsubCheckpoints = stagingFreixo ? undefined : onSnapshot(
     query(collection(db, basePath, 'checkpoints'), where('ownerId', '==', uid)),
     (snap) => {
       const list = snap.docs.map((d) => d.data() as Checkpoint);
@@ -193,7 +203,7 @@ export function subscribeCampaignDetails(
     unsubNpcs();
     unsubNarrative();
     unsubEvents();
-    unsubCheckpoints();
+    unsubCheckpoints?.();
   };
 }
 

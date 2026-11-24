@@ -191,3 +191,11 @@ export type RuleResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
 
+export interface PilotScene {
+  revision: number;
+  timelineId: string;
+  location: string;
+  exits: { id: string; label: string }[];
+  people: { id: string; name: string; available: boolean }[];
+  landmarks: { id: string; name: string }[];
+}

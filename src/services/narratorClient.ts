@@ -1,4 +1,11 @@
 import type { TurnOrigin } from '../engine/turnIdentity';
+import type { PilotScene } from '../types/game';
+
+export async function requestPilotScene(token: string, signal: AbortSignal): Promise<PilotScene> {
+  const response = await fetch('/api/freixo/scene', { headers: { Authorization: `Bearer ${token}` }, signal });
+  if (!response.ok) throw new Error('Cena indisponível.');
+  return response.json();
+}
 
 export interface RequestNarratorTurnOptions {
   campaignId: string;

@@ -4,6 +4,7 @@ import { createEchoArcBundle } from '../src/engine/echoArcFixture';
 import { advanceNpcRoutines, routineScene } from '../src/engine/npcRoutine';
 import { advanceWorldTime } from '../src/engine/rulesEngine';
 import { familyYard, freixoPlayableCatalog } from '../scripts/echoArcFreeTurn';
+import { freixoFamilyKitchen } from '../src/engine/npcIdentity';
 import { planTurn } from '../src/engine/turnPlanner';
 
 const bundle = createEchoArcBundle('dono');
@@ -17,6 +18,20 @@ const catalog = {
   routes: [{ from: home, to: workshop, minutes: 4 }],
 };
 const end = advanceWorldTime(campaign.worldTime, 8);
+
+test('Teresa cumpre a rotina da manhã na cozinha do piloto e encerra a atividade no horário', () => {
+  const pilot = { ...campaign, id: 'echo-arc-server-pilot', currentLocation: freixoFamilyKitchen,
+    worldTime: { ...campaign.worldTime, hour: 10, minute: 45 } };
+  const records = [{ ...teresa, campaignId: pilot.id, location: freixoFamilyKitchen }];
+  const later = { ...pilot, worldTime: advanceWorldTime(pilot.worldTime, 5) };
+  const morning = advanceNpcRoutines(pilot, later.worldTime, records, freixoPlayableCatalog, undefined, undefined, true);
+  assert.deepEqual(morning.moves, []);
+  assert.equal(morning.state.activities[0]?.location, freixoFamilyKitchen);
+  assert.deepEqual(routineScene(later, records, morning.state).activities.map(({ name }) => name), ['Teresa']);
+  const afterWindow = { ...later, worldTime: advanceWorldTime(later.worldTime, 10) };
+  assert.deepEqual(routineScene(afterWindow, records, morning.state).activities, []);
+  assert.equal(routineScene(afterWindow, records, morning.state).npcs[0]?.location, freixoFamilyKitchen);
+});
 
 test('a ligação provisória serve ao jogador e à rotina de Henrique no piloto', () => {
   const atYard = { ...campaign, currentLocation: familyYard };

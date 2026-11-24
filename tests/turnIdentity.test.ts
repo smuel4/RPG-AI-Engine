@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fetchCommittedTurn } from '../server/campaignAccess';
 import { checkTurnRevision, turnDocumentIds } from '../src/engine/turnIdentity';
+import { selectOwnedCampaignId, SERVER_PILOT_ID } from '../src/engine/pilotCampaign';
+
+test('piloto visual ignora campanhas comuns mesmo quando o nome ou a URL apontam para ECHO ARC', () => {
+  const general = { id: 'echo_arc_comum', name: 'ECHO ARC' };
+  const pilot = { id: SERVER_PILOT_ID, name: 'ECHO ARC' };
+  assert.equal(selectOwnedCampaignId([general, pilot], general.id, true), pilot.id);
+  assert.equal(selectOwnedCampaignId([general], general.id, true), null);
+  assert.equal(selectOwnedCampaignId([], pilot.id, true), null);
+  assert.equal(selectOwnedCampaignId([general, pilot], general.id, false), general.id);
+  assert.equal(selectOwnedCampaignId([general, pilot], null, false), general.id);
+});
 
 const turn = {
   turnId: '00000000-0000-4000-8000-000000000001',

@@ -11,6 +11,7 @@ export interface NpcRoutineState {
   memories?: readonly NpcMemory[];
   relationships?: readonly CharacterRelationship[];
   completedActivities?: readonly string[];
+  witnessedOccurrences?: readonly { id: string; sequence: number }[];
   openObjects?: readonly string[];
   bridgeOffer?: {
     id: string;
@@ -93,6 +94,25 @@ export function advanceNpcRoutines(campaign: Campaign, end: WorldTime, records: 
   };
 }
 
+function activeActivities(campaign: Campaign, npc: NpcRecord, state: NpcRoutineState) {
+  const identity = getNpcIdentity(campaign, npc);
+  const hour = campaign.worldTime.hour + campaign.worldTime.minute / 60;
+  return state.activities.filter((entry) => {
+    const routine = entry.stage === 'next' ? identity?.nextRoutine : identity?.routine;
+    return routine && hour >= routine.fromHour && hour < routine.untilHour && entry.npcId === npc.id &&
+      entry.location === npc.location && entry.day === day(campaign.worldTime);
+  });
+}
+
+export function visibleRoutineOccurrences(campaign: Campaign, present: readonly NpcRecord[], state: NpcRoutineState,
+  catalog: TurnCatalog) {
+  return (catalog.occurrences ?? []).filter((occurrence) => occurrence.location === campaign.currentLocation &&
+    present.some((npc) => npc.location === occurrence.location &&
+      getNpcIdentity(campaign, npc)?.key === occurrence.npcKey &&
+      !isNpcOccupied(state, npc.id, campaign.worldTime) &&
+      activeActivities(campaign, npc, state).some(({ stage }) => (stage ?? 'primary') === occurrence.routine)));
+}
+
 export function routineScene(campaign: Campaign, records: readonly NpcRecord[], state: NpcRoutineState,
   throughSequence?: number) {
   const npcs = records.filter(({ location }) => location === campaign.currentLocation);
@@ -102,16 +122,8 @@ export function routineScene(campaign: Campaign, records: readonly NpcRecord[], 
     return state.observations.filter(({ npcId }) => npcId === npc.id)
       .map(({ fact }) => ({ source: 'observed' as const, fact, knownBy: [key] }));
   });
-  const activities = npcs.flatMap((npc) => {
-    const identity = getNpcIdentity(campaign, npc);
-    const hour = campaign.worldTime.hour + campaign.worldTime.minute / 60;
-    return state.activities.filter((entry) => {
-      const routine = entry.stage === 'next' ? identity?.nextRoutine : identity?.routine;
-      return routine && hour >= routine.fromHour && hour < routine.untilHour && entry.npcId === npc.id &&
-        entry.location === npc.location && entry.day === day(campaign.worldTime);
-    })
-      .map(({ activity }) => ({ name: npc.name, activity }));
-  });
+  const activities = npcs.flatMap((npc) => activeActivities(campaign, npc, state)
+    .map(({ activity }) => ({ name: npc.name, activity })));
   return { npcs, knowledge, activities,
     memories: recallNpcMemories(campaign, npcs, state.memories ?? [], throughSequence) };
 }

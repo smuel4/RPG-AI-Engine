@@ -1,22 +1,22 @@
 import { type Firestore, FieldValue } from 'firebase-admin/firestore';
 import { isDeepStrictEqual } from 'node:util';
-import { advanceWorldTime, getActiveTimelineId, processPlayerAction } from '../src/engine/rulesEngine';
-import { advanceNpcRoutines, isNpcOccupied, routineScene, type NpcRoutineState } from '../src/engine/npcRoutine';
+import { advanceWorldTime, getActiveTimelineId, getCampaignTimelineLineage, isSequenceInTimelineLineage, processPlayerAction } from '../src/engine/rulesEngine';
+import { advanceNpcRoutines, isNpcOccupied, routineScene, visibleRoutineOccurrences, type NpcRoutineState } from '../src/engine/npcRoutine';
 import { MAX_NPC_MEMORY_LENGTH, recordNpcMemories } from '../src/engine/npcMemory';
 import { freixoFamilyKitchen, getNpcIdentity } from '../src/engine/npcIdentity';
 import { PLAYER_CHARACTER_ID, recordFirstEncounters, recordPersonalDisclosure, relationshipsInScene } from '../src/engine/npcRelationship';
 import { checkTurnRevision, isTurnId, readCommittedTurn, turnDocumentIds, type TurnIdentity } from '../src/engine/turnIdentity';
-import { matchCatalogLabels, planPilotTravel, planPilotWait, resolvePlannedOutcome, type TurnCatalog } from '../src/engine/turnPlanner';
+import { matchCatalogLabels, pilotTravelVerb, planPilotTravel, planPilotWait, resolvePlannedOutcome, startsPilotTravel, type TurnCatalog } from '../src/engine/turnPlanner';
 import { formatWorldClock } from '../src/engine/constants';
 import type { Campaign, GameEvent, InventoryItem, NarrativeEntry, NpcRecord, PilotFocus } from '../src/types/game';
-import { validateNarration } from './narratorProvider';
+import { NARRATION_MAX_LENGTH, validateNarration } from './narratorProvider';
 import { answerPilotQuestion } from './pilotFactualDialogue';
 import { claimsUnconfirmedPlayerConsequence, narratedObjectTransition } from './pilotNarrativeIntegrity';
 
-export const SERVER_PILOT_ID = 'echo-arc-server-pilot';
+import { SERVER_PILOT_ID } from '../src/engine/pilotCampaign';
+export { SERVER_PILOT_ID };
 const speechIntent = /^(?:eu\s+)?(?:digo|falo|conto|confidencio)\b/iu;
 const directedSpeech = /^(?:eu\s+)?(digo|falo|conto|confidencio)\s+(?:a|ao|à|para)\s+([\p{L}\p{M}\p{Zs}'’-]+)\s*[:：]\s*([\s\S]+)$/iu;
-const travelIntent = /^(?:eu\s+)?(?:vou|caminho|sigo|quero\s+(?:ir|explorar)|pretendo\s+ir|exploro)\b/iu;
 const transferIntent = /^(?:eu\s+)?(?:(pego|recolho|largo|deixo)|(?:quero|vou)\s+(pegar|recolher|largar|deixar))\s+(.+?)[.!?]?$/iu;
 const deliveryIntent = /^(?:eu\s+)?(entrego|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|ofereço)\s+(.+?)\s+(?:para|ao|à|a)\s+(.+?)[.!]?$/iu;
 const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
@@ -45,34 +45,39 @@ const dialogueSyntax = (text: string) => text.normalize('NFKC')
   .replace(/[\u200B\uFEFF]/gu, '').replace(/\s+/gu, ' ').trim();
 
 function naturalSpeech(action: string, here: readonly NpcRecord[], records: readonly NpcRecord[],
-  focus: readonly PilotFocus[]) {
+  focus: readonly PilotFocus[], question: boolean) {
   const inquiry = /^(?:eu\s+)?(?:(?:(?:quero|gostaria de|vou)\s+(?:conversar|falar)|converso|falo)\s+com|abordo)\s+([^,.!?]+?)(?:\s+sobre\s+(.+?))?[.!?]?$/iu.exec(action);
   const indirectGreeting = /^(?:eu\s+)?(?:cumprimento\s+|dou\s+(?:bom dia|boa tarde|boa noite)\s+(?:a|ao|à|para)\s+)([^,.!?]+)[.!?]*$/iu.exec(action);
   const indirectQuestion = /^(?:eu\s+)?(?:pergunto|(?:quero|queria|gostaria de) saber)(?:\s+(?:a|ao|à|para)\s+(.+?))?\s+((?:como|se|onde|quando|por que|qual|quanto|o que|no que|em que|com que|quem)\b.+)$/iu.exec(action);
   const report = /^(?:eu\s+)?(digo|falo|conto|confidencio)\s+(?:a|ao|à|para)\s+(.+?)\s+que\s+(.+)$/iu.exec(action);
   const greeting = /^(bom dia|boa tarde|boa noite|oi|ol[aá]|tchau|at[ée] logo|at[ée] mais)(?:(?:\s*[,–—]\s*|\s+)([^,.!?]+))?[.!?…]*$/iu.exec(action);
   const vocative = /^([\p{L}\p{M}\p{Zs}'’-]+?)\s*,\s*(.+)$/iu.exec(action);
-  const directQuestion = action.endsWith('?') && !travelIntent.test(action);
+  // A question mark alone does not address the NPC standing nearby.
+  const focusedQuestion = question && !startsPilotTravel(action) &&
+    /\b(?:voce|tu)\b/u.test(normalize(action)) && focus.some(({ kind }) => kind === 'npc');
+  if (question && !indirectQuestion && !greeting && (inquiry || report || (!vocative && !focusedQuestion))) return null;
   const recognized = Boolean(inquiry || indirectGreeting || indirectQuestion || greeting || report);
-  const question = indirectQuestion?.[2];
-  const pronoun = question && /\b(ela|ele|dela|dele)\b/u.exec(normalize(question))?.[1];
-  const mentioned = question && records.filter(({ name }) =>
-    (' ' + normalize(question).replace(/[^\p{L}]+/gu, ' ') + ' ').includes(' ' + normalize(name) + ' '));
+  const questionText = indirectQuestion?.[2];
+  const pronoun = questionText && /\b(ela|ele|dela|dele)\b/u.exec(normalize(questionText))?.[1];
+  const mentioned = questionText && records.filter(({ name }) =>
+    (' ' + normalize(questionText).replace(/[^\p{L}]+/gu, ' ') + ' ').includes(' ' + normalize(name) + ' '));
+  if (indirectQuestion && !indirectQuestion[1] && !/^(?:eu )?pergunto\b/iu.test(action) &&
+      !focus.some(({ kind }) => kind === 'npc')) return null;
   if (indirectQuestion && !indirectQuestion[1] && mentioned && mentioned.length > 1) {
     throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE');
   }
   const address = inquiry?.[1] ?? indirectGreeting?.[1] ?? indirectQuestion?.[1] ??
     report?.[2] ?? greeting?.[2] ?? (recognized
       ? (mentioned || [])[0]?.name ?? pronoun?.replace(/^d/, '') : vocative?.[1]) ?? '';
-  if (!recognized && !vocative && !directQuestion) return null;
+  if (!recognized && !vocative && !focusedQuestion) return null;
   const candidates = resolveNpc(address, here, records, focus);
   if (!recognized && !candidates.contextual && !candidates.named) return null;
   if (!candidates.npc) throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE', undefined, undefined, candidates.absentNpcName);
   return { recipient: candidates.npc, indirect: Boolean(indirectGreeting || indirectQuestion || report || inquiry?.[2]),
     verb: report?.[1] ?? 'digo',
-    question: Boolean(indirectQuestion || (!recognized && (directQuestion || vocative))),
+    question: Boolean(indirectQuestion || (!recognized && (focusedQuestion || vocative))),
     statement: inquiry ? inquiry[2] ? 'Assunto: ' + inquiry[2] : null
-      : report?.[3] ?? question ?? (recognized || !vocative ? action : vocative[2].trim()) };
+      : report?.[3] ?? questionText ?? (recognized || !vocative ? action : vocative[2].trim()) };
 }
 
 function resolveNpc(address: string, here: readonly NpcRecord[], records: readonly NpcRecord[],
@@ -175,13 +180,15 @@ export class PilotTurnError extends Error {
       openClose?: 'abrir' | 'fechar' }) { super(code); }
 }
 
+const sequenceSeparator = new RegExp(String.raw`\s*;\s*|\s*,?\s+\b(?:e\s+depois|depois|em seguida)\s+|\s+e\s+(?=(?:eu\s+)?(?:${pilotTravelVerb}|olho|observo|examino|inspeciono|organizo|arrumo|abro|escancaro|fecho|espero|aguardo|fico\s+aqui\s+esperando|ajudo|quero|pergunto|digo|falo|converso|abordo|conto|confidencio|cumprimento|guardo|coloco|retiro|tiro|tento|pego|recolho|largo|deixo|entrego|ofereço|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|se)\b)`, 'iu');
+
 function splitPilotActions(action: string): string[] {
   const steps: string[] = [];
   let remaining = action;
   while (true) {
     // Preserve the literal contents of a colon-delimited utterance.
     const separator = directedSpeech.test(dialogueSyntax(remaining)) ? null
-      : /\s*;\s*|\s*,?\s+\b(?:e\s+depois|depois|em seguida)\s+|\s+e\s+(?=(?:eu\s+)?(?:vou|caminho|sigo|olho|observo|examino|inspeciono|organizo|arrumo|abro|escancaro|fecho|espero|aguardo|fico\s+aqui\s+esperando|ajudo|quero|pergunto|digo|falo|conto|confidencio|cumprimento|guardo|coloco|retiro|tiro|tento|pego|recolho|largo|deixo|entrego|ofereço|dou(?!\s+(?:bom dia|boa tarde|boa noite)\b)|se)\b)/iu.exec(remaining);
+      : sequenceSeparator.exec(remaining);
     if (!separator) return [...steps, remaining.trim()];
     steps.push(remaining.slice(0, separator.index).trim().replace(/,$/u, ''));
     if (steps.length === 2) throw new PilotTurnError('PILOT_SEQUENCE_LIMIT', undefined, 3);
@@ -294,10 +301,9 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const syntax = dialogueSyntax(action).replace(/^(?:"(.+)"|“(.+)”)$/u, '$1$2').trim();
     const commandSyntax = syntax.replace(/[.!]+$/u, '.');
     const waiting = planPilotWait(syntax, campaign.worldTime);
-    if (waiting && actions.length > 1) throw new PilotTurnError('PILOT_WAIT_SEQUENCE');
     const observation = /^(?:eu\s+)?(?:(?:quero|vou)\s+(?:observar|examinar|olhar|inspecionar)|observo|examino|olho|inspeciono|dou uma olhada(?:\s+n[oa]s?)?)\s+(?:mais\s+de\s+perto\s+)?(.+?)[.!]?$/iu.exec(commandSyntax);
-    const search = /^(?:(?:eu )?(?:procuro|quero encontrar)(?: por)?|onde (?:posso )?(?:achar|encontrar)|onde encontro) (.+?)[.!?]?$/iu.exec(syntax);
-    const directions = /^(?:(?:será que )?(?:existe|há|tem) (?:um )?caminho (?:para|até)|como (?:posso chegar|chego) (?:ao|à|até|em)|onde fica) (.+?)\??$/iu.exec(syntax);
+    const search = /^(?:(?:eu )?(?:procuro|quero encontrar)(?: por)?|onde (?:posso )?(?:achar|encontrar)|onde (?:encontro|está|anda)) (.+?)[.!?]*$/iu.exec(syntax);
+    const directions = /^(?:(?:será que )?(?:existe|há|tem) (?:um )?caminho (?:para|até)|como (?:posso chegar|chego) (?:ao|à|até|em)|onde fica|(?:será que )?(?:posso|consigo|dá para|é possível) (?:ir|voltar|retornar|chegar) (?:ao|à|a|para|até|em)) (.+?)(?: por aqui)?[.!?]*$/iu.exec(syntax);
     const help = /^(?:eu\s+)?(?:ajudo|(?:quero|vou|tento)\s+ajudar)\s+(.+?)\s+a\s+(\p{L}+)\s+(.+?)[.!]?$/iu.exec(commandSyntax);
     const explicitSpeech = directedSpeech.exec(action) ?? directedSpeech.exec(syntax);
     const here = records.filter((npc) => npc.location === campaign.currentLocation);
@@ -310,25 +316,37 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     const bareBridgeAnswer = bridgeAnswer(syntax) ??
       (pendingOffer && contextualRecipient === offer.npcId
         ? contextualBridgeAnswer(motherAddress ? syntax.replace(motherAddress[0], '') : syntax) : undefined);
+    const undirected = !explicitSpeech && !bareBridgeAnswer;
+    const commandLead = normalize(syntax).replace(/^eu\s+/u, '');
+    const speculative = /^(?:e se|se|caso|talvez|nao)\b/u.test(commandLead);
+    if (undirected && speculative) throw new PilotTurnError('PILOT_ACTION_UNSUPPORTED');
+    const question = syntax.includes('?') ||
+      /^(?:sera que|da para|e possivel|posso|podemos|poderia|consigo|devo|deveria|como|onde|quando|quem|qual|quanto|por que|o que)\b/u.test(commandLead);
+    if ((directions || search) && actions.length > 1) throw new PilotTurnError('PILOT_SEQUENCE_NEEDS_REPLY');
     const storage = storageIntent(commandSyntax);
     const transferCommand = waiting ? null : transferIntent.exec(commandSyntax);
     const delivery = deliveryIntent.exec(commandSyntax);
     const organize = /^(?:eu\s+)?(?:organizo|arrumo|vou\s+(?:organizar|arrumar))\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
     const opening = /^(?:eu\s+)?(abro|escancaro|fecho)\s+(.+?)(?:\s+novamente)?[.!]?$/iu.exec(commandSyntax);
+    const transferring = transferCommand || delivery || storage;
+    const natural = explicitSpeech || bareBridgeAnswer || observation || search || directions || help || transferring || organize || waiting || opening
+      ? null : naturalSpeech(syntax, here, records, context, question);
+    // Resolve factual queries and directed speech before allowing any effects from a step.
+    if (undirected && question && !directions && !search && !natural) {
+      throw new PilotTurnError('PILOT_INTENT_CLARIFICATION');
+    }
+    if (waiting && actions.length > 1) throw new PilotTurnError('PILOT_WAIT_SEQUENCE');
     if (opening && actions.length > 1) throw new PilotTurnError('PILOT_OPEN_CLOSE_SEQUENCE');
     if (organize && actions.length > 1) throw new PilotTurnError('PILOT_ENVIRONMENT_SEQUENCE');
-    const transferring = transferCommand || delivery || storage;
     if (transferring && actions.length > 1) throw new PilotTurnError('PILOT_TRANSFER_SEQUENCE');
     const localObjects = catalogObjects.filter((object) => objectLocation(object) === campaign.currentLocation);
     const bareObservation = /^(?:eu\s+)?(?:examino|observo|olho|inspeciono)[.!?]?$/iu.exec(commandSyntax);
     if (bareObservation && actions.length === 1 && localObjects.length) {
       throw new PilotTurnError('PILOT_OBJECT_AMBIGUOUS', undefined, undefined, undefined, syntax.replace(/[.!?]$/, ''));
     }
-    const natural = explicitSpeech || bareBridgeAnswer || observation || search || directions || help || transferring || organize || waiting || opening
-      ? null : naturalSpeech(syntax, here, records, context);
     if (!explicitSpeech && !natural && speechIntent.test(syntax)) throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE');
     const speech = Boolean(explicitSpeech || natural || bareBridgeAnswer);
-    if (!speech && !observation && !search && !directions && !help && !transferring && !organize && !waiting && !opening && (!travelIntent.test(syntax) ||
+    if (!speech && !observation && !search && !directions && !help && !transferring && !organize && !waiting && !opening && (!startsPilotTravel(syntax) ||
         /^(?:eu\s+)?vou\s+(?:observar|olhar|examinar|inspecionar|ajudar|mexer|pegar|interagir)\b/iu.test(action))) {
       throw new PilotTurnError('PILOT_ACTION_UNSUPPORTED');
     }
@@ -503,7 +521,7 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
         if (!complete || !recipient || (!statement && !natural) || (remember && statement.length > MAX_NPC_MEMORY_LENGTH)) {
           throw new PilotTurnError('PILOT_SPEECH_UNAVAILABLE', undefined, undefined, explicitRecipient?.absentNpcName);
         }
-        const isQuestion = natural?.question ?? statement.endsWith('?');
+        const isQuestion = natural?.question ?? /\?["'”’»]*$/u.test(statement);
         const factualAnswer = isQuestion && !remember
           ? answerPilotQuestion(statement, campaign, recipient, records, runtime, catalog, portableState) : undefined;
         if (isNpcOccupied(runtime, recipient.id, campaign.worldTime)) {
@@ -846,11 +864,14 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
       throw error;
     }
   }
-  const narration = validateNarration(descriptions.join('\n\n'), 'groq');
-  const { state } = last;
-  const result = processPlayerAction(campaign, [], [], action, outcome.elapsedMinutes, narration);
-  if (!result.ok) throw new PilotTurnError('PILOT_ACTION_INVALID');
-  const { data } = result;
+  const baseNarration = validateNarration(descriptions.join('\n\n'), 'groq');
+  // Announce public occurrences after a timed arrival or wait, outside any private dialogue.
+  const candidates = complete && last.outcome.elapsedMinutes > 0 &&
+    ('kind' in last.plan ? last.plan.kind === 'wait' : last.plan.intent.kind === 'travel')
+    ? visibleRoutineOccurrences(last.arrival, last.present.npcs, last.state, catalog).filter(({ id, narration }) =>
+      !last.state.witnessedOccurrences?.some((entry) => entry.id === id) &&
+      baseNarration.length + 2 + narration.length <= NARRATION_MAX_LENGTH)
+    : [];
   return db.runTransaction(async (tx) => {
     const current = await read(tx);
     if (current.entry) return { mode: 'replay' as const, narration: current.entry.content, expectedLastSequence: current.entry.sequence - 2 };
@@ -859,6 +880,28 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
         !isDeepStrictEqual(current.portableState, portableState) || current.complete !== complete) {
       throw new PilotTurnError('CONCURRENT_STATE_CONFLICT');
     }
+    let occurrence: (typeof candidates)[number] | undefined = candidates[0];
+    if (occurrence) {
+      const lineage = getCampaignTimelineLineage(current.campaign);
+      const ancestors = lineage.filter(({ timelineId }) => timelineId !== turn.baseTimelineId);
+      // Restore keeps the routine documents per timeline. Only markers before the active cutoff count.
+      const snapshots = ancestors.length
+        ? await tx.getAll(...ancestors.map(({ timelineId }) =>
+          campaignRef.collection('npcRoutineState').doc(timelineId)))
+        : [];
+      const seen = new Set(snapshots.flatMap((snapshot, index) =>
+        ((snapshot.data() as NpcRoutineState | undefined)?.witnessedOccurrences ?? [])
+          .filter(({ sequence }) => isSequenceInTimelineLineage(ancestors[index].timelineId, sequence, lineage))
+          .map(({ id }) => id)));
+      occurrence = candidates.find(({ id }) => !seen.has(id));
+    }
+    const narration = occurrence ? baseNarration + '\n\n' + occurrence.narration : baseNarration;
+    const result = processPlayerAction(campaign, [], [], action, outcome.elapsedMinutes, narration);
+    if (!result.ok) throw new PilotTurnError('PILOT_ACTION_INVALID');
+    const { data } = result;
+    const state = occurrence ? { ...last.state,
+      witnessedOccurrences: [...(last.state.witnessedOccurrences ?? []),
+        { id: occurrence.id, sequence: data.engineEntry.sequence }] } : last.state;
     const stamp = FieldValue.serverTimestamp();
     tx.update(campaignRef, { currentLocation: outcome.location, worldTime: data.nextWorldTime,
       lastSequence: data.nextLastSequence, revision: data.nextRevision, updatedAt: stamp });
@@ -889,10 +932,11 @@ export async function persistPilotTurn(db: Firestore, catalog: TurnCatalog, owne
     }
     if (state !== runtime && current.routineRef &&
         (state.activities.length || state.memories?.length || state.relationships?.length ||
-          state.completedActivities?.length || state.openObjects !== undefined || state.bridgeOffer)) {
+          state.completedActivities?.length || state.openObjects !== undefined || state.bridgeOffer || state.witnessedOccurrences?.length)) {
       tx.set(current.routineRef, state);
     }
     tx.create(receiptRef, { ownerId, turn, plan, resolution, outcome, playerEntryId: ids.player,
+      ...(occurrence ? { occurrenceId: occurrence.id } : {}),
       ...(clarification ? { clarificationBinding: clarification.binding } : {}), createdAt: stamp });
     return { mode: 'replay' as const, narration, expectedLastSequence: campaign.lastSequence };
   });

@@ -5,7 +5,8 @@ export type TurnIntent =
   | { kind: 'observe' | 'talk' | 'open' };
 
 export interface TurnCatalog {
-  places: readonly { id: string; aliases: readonly string[] }[];
+  // id is the execution and storage reference. stableId is an optional exact reference for callers.
+  places: readonly { id: string; stableId?: string; name?: string; aliases: readonly string[]; description?: string }[];
   routes: readonly { from: string; to: string; minutes: number; blocked?: boolean }[];
   objects?: readonly { id: string; name: string; aliases: readonly string[]; location: string;
     description: string; condition?: { activityId: string; initial: string; organize?: { completed: string };
@@ -14,6 +15,8 @@ export interface TurnCatalog {
     portable?: { storageId?: string; ownerNpcId?: string; delivery?: { recipientKey: string; location: string } } }[];
   activities?: readonly { id: string; location: string; participant: string; verb: string;
     target: string; minutes: number; result: string; blocked?: boolean }[];
+  occurrences?: readonly { id: string; location: string; npcKey: string;
+    routine: 'primary' | 'next'; narration: string }[];
 }
 
 export interface TurnPlan {
@@ -32,6 +35,15 @@ export type TurnPlanningResult = TurnPlan | {
   origin: string;
   reason: 'ambiguous-destination' | 'unknown-destination' | 'uncatalogued-destination' | 'unknown-route' | 'unmet-conditions';
 };
+
+export function resolvePlaceReference(catalog: Pick<TurnCatalog, 'places'>, reference: string) {
+  return catalog.places.find(({ id }) => id === reference) ??
+    catalog.places.find(({ stableId }) => stableId === reference);
+}
+
+export function placeCommandLabels({ id, name, aliases }: TurnCatalog['places'][number]): readonly string[] {
+  return name ? [id, name, ...aliases] : [id, ...aliases];
+}
 
 function words(value: string): string[] {
   return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -80,12 +92,13 @@ export function planTurn(
   conditions: readonly { description: string; met: boolean }[] = [],
   routeLimits?: { maxHops: number; maxMinutes: number },
 ): TurnPlanningResult {
-  const origin = state.currentLocation;
+  const origin = resolvePlaceReference(catalog, state.currentLocation)?.id ?? state.currentLocation;
   const clarify = (reason: Extract<TurnPlanningResult, { status: 'clarification' }>['reason']): TurnPlanningResult =>
     ({ status: 'clarification', origin, reason });
   let intent: TurnIntent;
   if (typeof action !== 'string') {
-    intent = action;
+    const place = action.kind === 'travel' ? resolvePlaceReference(catalog, action.destination) : undefined;
+    intent = place ? { kind: 'travel', destination: place.id } : action;
   } else {
     const tokens = words(action);
     if (tokens[0] === 'eu') tokens.shift();
@@ -96,8 +109,8 @@ export function planTurn(
       if (action.includes('?') || ['ou', 'talvez', 'se', 'nao'].some((word) => tokens.includes(word))) {
         return clarify('ambiguous-destination');
       }
-      const matches = catalog.places.filter(({ id, aliases }) =>
-        [id, ...aliases].some((alias) => contains(tokens.slice(1), alias)));
+      const matches = catalog.places.filter((place) =>
+        placeCommandLabels(place).some((alias) => contains(tokens.slice(1), alias)));
       if (matches.length !== 1) return clarify(matches.length ? 'ambiguous-destination' : 'unknown-destination');
       intent = { kind: 'travel', destination: matches[0].id };
     } else {
@@ -149,15 +162,29 @@ function findRoute(origin: string, destination: string, catalog: TurnCatalog,
   return best;
 }
 
+export const pilotTravelVerb = '(?:vou|caminho|sigo|volto|retorno|(?:quero|pretendo)\\s+(?:ir|voltar|retornar)|quero\\s+explorar|exploro)';
+const pilotTravelPrefix = new RegExp(`^(?:eu )?${pilotTravelVerb}\\b`, 'u');
+const pilotTravelCommand = new RegExp(
+  `^(?:eu )?(?:(?:${pilotTravelVerb}(?: dar uma volta)?) (?:(?:da|do|de) ([\\p{L}\\p{N} -]+?) para |(?:ate|ao|a|para) )|(?:quero |vou )?explorar |exploro )([\\p{L}\\p{N} -]+?)[.!]*$`, 'u',
+);
+
+function normalizePilotTravel(action: string) {
+  return action.normalize('NFD').replace(/\p{M}/gu, '').trim().replace(/\s+/gu, ' ').toLowerCase();
+}
+
+export function startsPilotTravel(action: string) {
+  return pilotTravelPrefix.test(normalizePilotTravel(action));
+}
+
 export function planPilotTravel(action: string, state: { currentLocation: string }, catalog: TurnCatalog,
   establishedPlaces: readonly string[] = []): TurnPlanningResult {
-  const source = action.normalize('NFD').replace(/\p{M}/gu, '').trim().replace(/\s+/gu, ' ').toLowerCase();
-  const command = /^(?:eu )?(?:(?:vou(?: dar uma volta)?|caminho|sigo|quero ir|pretendo ir) (?:(?:da|do|de) ([\p{L}\p{N} -]+?) para |(?:ate|ao|a|para) )|(?:quero |vou )?explorar |exploro )([\p{L}\p{N} -]+?)[.!]*$/u.exec(source);
+  const source = normalizePilotTravel(action);
+  const command = pilotTravelCommand.exec(source);
   const refuse = (reason: 'unknown-destination' | 'uncatalogued-destination' | 'ambiguous-destination' | 'unknown-route'): TurnPlanningResult =>
     ({ status: 'clarification', origin: state.currentLocation, reason });
   if (/\bou\b/u.test(source)) return refuse('ambiguous-destination');
   if (!command || /\b(?:talvez|se|nao|depois|mas)\b/u.test(source)) return refuse('unknown-destination');
-  const labels = ({ id, aliases }: TurnCatalog['places'][number]) => [id, ...aliases];
+  const labels = placeCommandLabels;
   const destinations = matchCatalogLabels(command[2], catalog.places, labels, true);
   if (destinations.length > 1) return refuse('ambiguous-destination');
   if (!destinations.length) {
@@ -167,10 +194,15 @@ export function planPilotTravel(action: string, state: { currentLocation: string
   }
   if (command[1]) {
     const origins = matchCatalogLabels(command[1], catalog.places, labels);
-    if (origins.length !== 1 || origins[0].id !== state.currentLocation) return refuse('unknown-route');
+    if (origins.length !== 1 || origins[0].id !== resolvePlaceReference(catalog, state.currentLocation)?.id) return refuse('unknown-route');
   }
+  return planPilotTravelIntent({ kind: 'travel', destination: destinations[0].id }, state, catalog);
+}
+
+export function planPilotTravelIntent(intent: Extract<TurnIntent, { kind: 'travel' }>,
+  state: { currentLocation: string }, catalog: TurnCatalog): TurnPlanningResult {
   // Keep the pilot's existing full-interval routine simulation to short trips.
-  return planTurn({ kind: 'travel', destination: destinations[0].id }, state, catalog, [], { maxHops: 3, maxMinutes: 30 });
+  return planTurn(intent, state, catalog, [], { maxHops: 3, maxMinutes: 30 });
 }
 
 export const WAIT_MAX_MINUTES = 60;

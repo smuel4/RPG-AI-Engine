@@ -5,7 +5,7 @@ interface CharacterPanelProps {
   campaign: Campaign;
   npcs: NpcRecord[];
   isMutating: boolean;
-  onAdjustCurrency: (delta: Partial<Currency>) => void;
+  onAdjustCurrency?: (delta: Partial<Currency>) => void;
 }
 
 export function CharacterPanel({
@@ -125,7 +125,7 @@ export function CharacterPanel({
               <div className="font-mono-tabular text-sm font-semibold text-[#F2E2B0]">
                 {coin.value}
               </div>
-              <div className="flex items-center gap-1 pt-0.5">
+              {onAdjustCurrency && <div className="flex items-center gap-1 pt-0.5">
                 <button
                   type="button"
                   disabled={isMutating || campaign.status === 'archived'}
@@ -144,7 +144,7 @@ export function CharacterPanel({
                 >
                   <Plus className="w-3 h-3" aria-hidden="true" />
                 </button>
-              </div>
+              </div>}
             </div>
           ))}
         </div>

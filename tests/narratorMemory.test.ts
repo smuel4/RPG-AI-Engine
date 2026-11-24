@@ -6,9 +6,10 @@ import { buildNarratorContext } from '../server/narratorMemory';
 import { buildNarratorPrompt } from '../server/narratorProvider';
 
 test('perfis presentes mantêm identidade, rotina local e conhecimento individual no prompt compartilhado', () => {
-  const { campaign, npcs } = createEchoArcBundle('dono');
+  const { campaign, npcs, narrative } = createEchoArcBundle('dono');
   const [teresa, henrique] = npcs;
-  const contextAt = (location: string, hour: number, records = npcs) => buildNarratorContext({
+  const contextAt = (location: string, hour: number, records = npcs, publicOnly = false) => buildNarratorContext({
+    publicOnly,
     campaign: { ...campaign, currentLocation: location, worldTime: { ...campaign.worldTime, hour } },
     npcs: records, inventory: [], narrative: [],
     sceneKnowledge: [
@@ -43,6 +44,15 @@ test('perfis presentes mantêm identidade, rotina local e conhecimento individua
   assert.match(prompt, /Talvez haja vento/);
   assert.doesNotMatch(prompt, /A porta range|Pensamento reservado/);
   assert.ok(father.knowledge.some(({ source, fact }) => source === 'conversation' && fact === 'A porta range.'));
+  const publicContext = contextAt(teresa.location, 8, npcs, true);
+  assert.deepEqual(publicContext.currentState.npcSceneProfiles[0].knowledge,
+    [{ source: 'public', fact: 'A feira é hoje.' }]);
+  const seed = { ...narrative[0], createdAt: null };
+  const general = buildNarratorContext({ campaign, npcs, inventory: [], publicOnly: true, narrative: [
+    seed, { ...seed, id: 'private', privateRecipientId: teresa.id, content: 'Confidência de teste' },
+  ] });
+  assert.ok(general.recentActiveHistory.some(({ content }) => content === narrative[0].content));
+  assert.doesNotMatch(JSON.stringify(general), /Confidência de teste/);
 });
 
 const campaign = {

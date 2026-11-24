@@ -1,20 +1,30 @@
 import { initializeApp } from 'firebase/app';
-import { connectAuthEmulator, GoogleAuthProvider, getAuth } from 'firebase/auth';
+import { connectAuthEmulator, GoogleAuthProvider, getAuth, initializeAuth, inMemoryPersistence } from 'firebase/auth';
 import { connectFirestoreEmulator, doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { localEmulatorPort } from './localEmulatorPort';
 import type { PersistenceErrorState } from '../types/game';
+import { LocalPilotSessionError } from './localPilotAuth';
+import { stagingWebConfig } from '../engine/stagingConfig';
 
 const browser = typeof window !== 'undefined';
 export const localFreixo = import.meta.env?.VITE_FREIXO_LOCAL === 'true';
+const stagingConfig = stagingWebConfig({
+  VITE_FREIXO_LOCAL: import.meta.env?.VITE_FREIXO_LOCAL,
+  VITE_FREIXO_STAGING: import.meta.env?.VITE_FREIXO_STAGING,
+  VITE_STAGING_PROJECT_ID: import.meta.env?.VITE_STAGING_PROJECT_ID,
+  VITE_STAGING_API_KEY: import.meta.env?.VITE_STAGING_API_KEY,
+  VITE_STAGING_APP_ID: import.meta.env?.VITE_STAGING_APP_ID,
+});
+export const stagingFreixo = Boolean(stagingConfig);
 if (localFreixo && window.location.hostname !== '127.0.0.1') {
   throw new Error('Freixo local só pode abrir em 127.0.0.1.');
 }
 const app = localFreixo || !browser ? initializeApp({
   apiKey: 'demo', projectId: 'demo-rpg-ai-engine', appId: 'freixo-local',
-}, 'freixo-local') : initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-export const auth = getAuth(app);
+}, 'freixo-local') : initializeApp(stagingConfig ?? firebaseConfig);
+export const db = stagingFreixo ? getFirestore(app) : getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const auth = localFreixo ? initializeAuth(app, { persistence: inMemoryPersistence }) : getAuth(app);
 if (localFreixo) {
   const firestorePort = localEmulatorPort(import.meta.env.VITE_FIRESTORE_EMULATOR_PORT, 8080, 'VITE_FIRESTORE_EMULATOR_PORT');
   const authPort = localEmulatorPort(import.meta.env.VITE_AUTH_EMULATOR_PORT, 9099, 'VITE_AUTH_EMULATOR_PORT');
@@ -55,6 +65,7 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null,
 ): never {
+  if (error instanceof LocalPilotSessionError) throw error;
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -92,6 +103,9 @@ export function formatPersistenceError(
   error: unknown,
   fallbackTitle = 'Falha ao salvar no Cloud Firestore',
 ): PersistenceErrorState {
+  if (error instanceof LocalPilotSessionError) {
+    return { title: 'Sessão do piloto local', message: error.message, code: 'local-pilot-auth', retryable: false };
+  }
   const raw = error instanceof Error ? error.message : String(error);
   const parsed = tryParseFirestoreErrorInfo(raw);
   const underlyingMessage = parsed?.error ?? raw;
@@ -198,4 +212,4 @@ export async function testFirestoreConnection(): Promise<boolean> {
   }
 }
 
-if (browser) void testFirestoreConnection();
+if (browser && !stagingFreixo) void testFirestoreConnection();

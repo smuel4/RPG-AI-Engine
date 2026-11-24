@@ -1,17 +1,20 @@
 import { useEffect, useState } from 'react';
 import {
   onAuthStateChanged,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signOut,
   type User,
 } from 'firebase/auth';
-import { auth, googleProvider } from '../services/firebaseClient';
+import { auth, googleProvider, localFreixo } from '../services/firebaseClient';
+import { confirmLocalPilotSession, LocalPilotSessionError } from '../services/localPilotAuth';
 
 export interface AuthState {
   user: User | null;
   loading: boolean;
   authError: string | null;
   signInWithGoogle: () => Promise<void>;
+  signInWithLocalAccount: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   clearAuthError: () => void;
 }
@@ -25,6 +28,8 @@ export function useAuth(): AuthState {
     const unsub = onAuthStateChanged(
       auth,
       (nextUser) => {
+        // Local email login publishes the user only after a refresh against the emulator.
+        if (localFreixo && nextUser) return;
         setUser(nextUser);
         setLoading(false);
       },
@@ -39,6 +44,21 @@ export function useAuth(): AuthState {
     );
     return () => unsub();
   }, []);
+
+  const signInWithLocalAccount = async (email: string, password: string) => {
+    if (!localFreixo) return;
+    setAuthError(null);
+    setLoading(true);
+    try {
+      const { user: signedIn } = await signInWithEmailAndPassword(auth, email, password);
+      await confirmLocalPilotSession(auth, signedIn);
+      setUser(signedIn);
+    } catch (error) {
+      setAuthError(error instanceof LocalPilotSessionError ? error.message : 'Use a conta local exibida no PowerShell.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const signInWithGoogle = async () => {
     setAuthError(null);
@@ -82,6 +102,7 @@ export function useAuth(): AuthState {
     loading,
     authError,
     signInWithGoogle,
+    signInWithLocalAccount,
     logout,
     clearAuthError: () => setAuthError(null),
   };

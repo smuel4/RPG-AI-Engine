@@ -3,62 +3,15 @@ import type { CampaignNarrationInput } from '../server/narratorService';
 import { advanceContinuity, familyKitchen, type createContinuityFixture } from './echoArcContinuityFixture';
 import { reviewEchoArcNarration } from './narrativeReview';
 import { planTurn } from '../src/engine/turnPlanner';
-import { createWellEncounterNpc, villageWell } from '../src/engine/echoArcEncounters';
-import type { TurnCatalog } from '../src/engine/turnPlanner';
-import { freixoFamilyYard, freixoWoodWorkshop } from '../src/engine/npcIdentity';
-export { villageWell };
-
-export const familyYard = freixoFamilyYard;
-export const familyRoom = 'Quarto de Samuel, casa da família, Vila de Freixo';
+import { createWellEncounterNpc } from '../src/engine/echoArcEncounters';
+import { familyRoom, familyYard, localCatalog, villageWell } from '../src/world/freixo';
+export { familyRoom, familyYard, freixoPlayableCatalog, localCatalog, villageWell } from '../src/world/freixo';
 
 const destinations = [
   { location: familyYard, name: /\b(?:quintal|patio|fora)\b/ },
   { location: familyKitchen, name: /\b(?:cozinha|casa)\b/ },
   { location: villageWell, name: /\bpoco\b/ },
 ];
-const routes = [
-  { from: familyKitchen, to: familyYard, minutes: 2 },
-  { from: familyYard, to: villageWell, minutes: 4 },
-  { from: familyKitchen, to: villageWell, minutes: 6 },
-  { from: familyKitchen, to: familyRoom, minutes: 1 },
-];
-export const localCatalog = {
-  places: [familyKitchen, familyYard, villageWell, familyRoom].map((id) => ({ id, aliases: [] })),
-  routes: routes.flatMap((route) => [route, { ...route, from: route.to, to: route.from }]),
-};
-
-export const freixoPlayableCatalog = {
-  // Provisional connection for the playable local pilot.
-  routes: [...localCatalog.routes,
-    { from: familyYard, to: freixoWoodWorkshop, minutes: 4 },
-    { from: freixoWoodWorkshop, to: familyYard, minutes: 4 }],
-  objects: [
-    { id: 'demo-armario-cozinha', name: 'armário', aliases: ['armário da cozinha'], location: familyKitchen,
-      description: 'Um pequeno armário fixo na cozinha.',
-      openable: { aberto: 'O armário está aberto.', fechado: 'O armário está fechado.' } },
-    { id: 'demo-bancada-cozinha', name: 'bancada', aliases: ['bancada da cozinha'], location: familyKitchen,
-      description: 'Há uma bancada de trabalho na cozinha.',
-      condition: { activityId: 'demo-organizar-cozinha', initial: 'A bancada ainda está por organizar.',
-        organize: { completed: 'A bancada está organizada.' }, knownBy: ['echo-arc:teresa'] } },
-    { id: 'demo-bancada-oficina', name: 'bancada de trabalho', aliases: ['bancada da oficina', 'bancada'],
-      location: freixoWoodWorkshop, description: 'Há uma bancada de trabalho na oficina de madeira.' },
-    // Initial test fixture for the authoritative pickup and drop flow.
-    { id: 'demo-bloco-madeira', name: 'bloco de madeira', aliases: ['bloco'], location: familyKitchen,
-      description: 'Um pequeno bloco de madeira sem marcas.',
-      // V2 fixture: only Henrique in the workshop is authorized to receive this object.
-      portable: { storageId: 'demo-armario-cozinha', delivery: { recipientKey: 'echo-arc:henrique', location: freixoWoodWorkshop } } },
-  ],
-  activities: [{ id: 'demo-organizar-cozinha', location: familyKitchen, participant: 'Teresa',
-    verb: 'organizar', target: 'cozinha', minutes: 5, result: 'A bancada da cozinha ficou organizada.' }],
-  places: [
-    { id: familyKitchen, aliases: ['cozinha', 'casa'] },
-    { id: familyYard, aliases: ['quintal', 'pátio'] },
-    { id: villageWell, aliases: ['poço'] },
-    { id: familyRoom, aliases: ['quarto'] },
-    { id: freixoWoodWorkshop, aliases: ['oficina', 'oficina de madeira', 'oficina de Henrique'] },
-  ],
-} satisfies TurnCatalog;
-
 type FreeState = ReturnType<typeof createContinuityFixture>;
 type Routine = { plan: FreeTurnPlan; fallback: string };
 type FreeTurnNarration = 'review' | 'narrated-plan' | 'plan-fallback';

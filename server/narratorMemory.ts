@@ -11,6 +11,7 @@ import type { recallNpcMemories } from '../src/engine/npcMemory';
 import type { relationshipsInScene } from '../src/engine/npcRelationship';
 
 export interface NarratorMemoryInput {
+  publicOnly?: boolean;
   campaign: Campaign;
   inventory: InventoryItem[];
   npcs: NpcRecord[];
@@ -50,7 +51,7 @@ export function buildNarratorContext(input: NarratorMemoryInput) {
     (entry) =>
       entry.campaignId === campaign.id &&
       entry.ownerId === campaign.ownerId &&
-      entry.sequence <= campaign.lastSequence,
+      entry.sequence <= campaign.lastSequence && (!input.publicOnly || entry.privateRecipientId === undefined),
   );
 
   const activeEntries = classifyNarrativeEntriesForAudit(
@@ -117,10 +118,10 @@ export function buildNarratorContext(input: NarratorMemoryInput) {
       activeTimelineId: campaign.activeTimelineId || ROOT_TIMELINE_ID,
       protagonist: protagonistState,
       knownPresentNpcs: campaignNpcs.filter(({ location }) => location === campaign.currentLocation).map(({ name }) => name),
-      npcSceneProfiles: npcSceneProfiles(campaign, npcRecords, input.sceneKnowledge),
+      npcSceneProfiles: npcSceneProfiles(campaign, npcRecords, input.sceneKnowledge, input.publicOnly),
       ...(input.npcActivities?.length ? { confirmedNpcActivities: input.npcActivities } : {}),
-      ...(input.npcMemories?.length ? { privateNpcMemories: input.npcMemories } : {}),
-      ...(input.npcRelationships?.length ? { privateNpcRelationships: input.npcRelationships } : {}),
+      ...(!input.publicOnly && input.npcMemories?.length ? { privateNpcMemories: input.npcMemories } : {}),
+      ...(!input.publicOnly && input.npcRelationships?.length ? { privateNpcRelationships: input.npcRelationships } : {}),
       npcLocations: campaignNpcs.map(({ name, location }) => ({ name, location })),
       inventory: campaignInventory,
     },

@@ -9,7 +9,8 @@ import { fetchCampaignContext, fetchCommittedTurn } from './server/campaignAcces
 import { checkTurnRevision, isTurnId, type TurnIdentity } from './src/engine/turnIdentity';
 import { diagnoseCampaignTurn } from './server/turnPlanDiagnostics';
 import { evaluatePilotTurn, readTurnPlanPilot } from './server/turnPlanPilot';
-import { getApps, initializeApp } from 'firebase-admin/app';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { persistPilotTurn, PilotTurnError, SERVER_PILOT_ID } from './server/persistPilotTurn';
 import { clarificationReceiptBinding, issuePilotClarification, readClarificationParts, readPilotClarification } from './server/pilotClarification';
@@ -19,13 +20,17 @@ import { describeNarratorFailure } from './server/narratorProvider';
 import { generateCampaignNarration, selectNarratorMode, tryAcquireNarratorTurn } from './server/narratorService';
 import { FixedMilestoneNarrator } from './src/engine/narratorPort';
 import { ROOT_TIMELINE_ID } from './src/engine/constants';
+import { readPilotScene } from './server/pilotScene';
+import { permitsStagingPlayer, readStagingConfig, stagingBuildTag } from './server/staging';
 
 const localFreixo = process.env.VITE_FREIXO_LOCAL === 'true';
-if (!localFreixo) dotenv.config();
-const turnPlanPilot = localFreixo ? { campaignId: SERVER_PILOT_ID,
-  catalog: (await import('./scripts/echoArcFreeTurn')).freixoPlayableCatalog }
+if (!localFreixo && process.env.VITE_FREIXO_STAGING === undefined) dotenv.config();
+const staging = readStagingConfig(process.env);
+const turnPlanPilot = localFreixo || staging ? { campaignId: SERVER_PILOT_ID,
+  catalog: (await import('./src/world/freixo')).freixoWorldPack.catalog }
   : readTurnPlanPilot(process.env.TURN_PLAN_PILOT_CATALOG, process.env.TURN_PLAN_PILOT_CAMPAIGN ?? '');
-const serverPilotEnabled = process.env.TURN_PLAN_SERVER_COMMIT === 'true';
+const localPilotEnabled = process.env.TURN_PLAN_SERVER_COMMIT === 'true';
+const serverPilotEnabled = localPilotEnabled || Boolean(staging);
 const alternateTest = localFreixo && process.env.FREIXO_TEST_ALT_PORTS === '1';
 const emulatorPorts = freixoEmulatorPorts(alternateTest);
 if (localFreixo && (!serverPilotEnabled || process.env.NODE_ENV === 'production' ||
@@ -35,7 +40,7 @@ if (localFreixo && (!serverPilotEnabled || process.env.NODE_ENV === 'production'
     !['fixed', 'groq'].includes(process.env.NARRATOR_MODE ?? 'fixed'))) {
   throw new Error('Freixo local exige modo de desenvolvimento, piloto e ambos os emuladores em loopback.');
 }
-if (serverPilotEnabled && (turnPlanPilot?.campaignId !== SERVER_PILOT_ID ||
+if (localPilotEnabled && (turnPlanPilot?.campaignId !== SERVER_PILOT_ID ||
     process.env.FIREBASE_PROJECT_ID !== 'demo-rpg-ai-engine' ||
     !/^127\.0\.0\.1:\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST ?? '') ||
     !/^127\.0\.0\.1:\d+$/.test(process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '') ||
@@ -47,6 +52,31 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === 'production';
+const frontendPath = path.resolve(__dirname, __dirname.endsWith(path.sep + 'dist-server') ? '../dist' : 'dist');
+const indexPath = path.join(frontendPath, 'index.html');
+if (IS_PROD) {
+  const html = fs.readFileSync(indexPath, 'utf8');
+  const tag = /<meta name="echo-arc-staging" content="([a-f0-9]+)">/u.exec(html)?.[1];
+  if (tag !== stagingBuildTag(process.env)) throw new Error('Build do frontend incompatível com o ambiente do servidor.');
+}
+const stagingApp = staging && initializeApp({ projectId: staging.web.projectId,
+  credential: cert(staging.credential) }, 'echo-arc-staging');
+
+async function verifyRequestPlayer(authorization?: string) {
+  if (!staging || !stagingApp) return verifyFirebasePlayer(authorization, serverPilotEnabled);
+  const token = /^Bearer\s+(\S+)$/iu.exec(authorization ?? '')?.[1];
+  if (!token) return null;
+  const decoded = await getAuth(stagingApp).verifyIdToken(token);
+  if (!permitsStagingPlayer(decoded, staging.web.projectId, staging.ownerUid)) return null;
+  const invitation = await getFirestore(stagingApp).doc('stagingAccess/pilot').get();
+  return invitation.data()?.ownerId === decoded.uid ? decoded.uid : null;
+}
+
+function pilotDatabase() {
+  const pilotApp = stagingApp ?? getApps().find(({ name }) => name === 'echo-arc-pilot-store') ??
+    initializeApp({ projectId: 'demo-rpg-ai-engine' }, 'echo-arc-pilot-store');
+  return stagingApp ? getFirestore(pilotApp) : getFirestore(pilotApp, process.env.FIRESTORE_DATABASE_ID!);
+}
 
 // Rate limiting defensivo por jogador (mínimo de 3 segundos entre ações consecutivas)
 const lastActionPerPlayer = new Map<string, number>();
@@ -70,6 +100,28 @@ async function startServer() {
     });
   });
 
+  app.get('/api/freixo/scene', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if ((!localFreixo && !staging) || !turnPlanPilot) {
+      res.sendStatus(404);
+      return;
+    }
+    const authorization = req.get('Authorization');
+    const playerId = authorization?.startsWith('Bearer ')
+      ? await verifyRequestPlayer(authorization).catch(() => null) : null;
+    if (!playerId) {
+      res.sendStatus(401);
+      return;
+    }
+    try {
+      const scene = await readPilotScene(pilotDatabase(), turnPlanPilot.catalog, playerId);
+      if (!scene) res.sendStatus(403);
+      else res.json(scene);
+    } catch {
+      res.sendStatus(503);
+    }
+  });
+
   // Stage 2: Turno do Narrador seguro e transacional
   app.post('/api/narrator/turn', async (req, res) => {
     const authorization = req.header('authorization');
@@ -83,7 +135,7 @@ async function startServer() {
     let playerId: string | null;
 
     try {
-      playerId = await verifyFirebasePlayer(authorization, serverPilotEnabled);
+      playerId = await verifyRequestPlayer(authorization);
     } catch {
       res.status(401).json({ code: 'INVALID_FIREBASE_TOKEN', message: 'Token Firebase inválido ou expirado.' });
       return;
@@ -154,17 +206,15 @@ async function startServer() {
           res.status(400).json({ code: 'PILOT_DISABLED', message: 'O turno requer o piloto local e sua identidade original.' });
           return;
         }
-        const app = getApps().find(({ name }) => name === 'echo-arc-pilot-store') ??
-          initializeApp({ projectId: 'demo-rpg-ai-engine' }, 'echo-arc-pilot-store');
         try {
-          const db = getFirestore(app, process.env.FIRESTORE_DATABASE_ID!);
+          const db = pilotDatabase();
           let objectAnswer: string | undefined;
           let clarification: { binding: string; replayOnly: boolean } | undefined;
           const clarificationToken: unknown = req.body?.clarificationToken;
           if (clarificationToken !== undefined) {
             const parts = readClarificationParts(clarificationToken);
             if (!parts) throw new PilotTurnError('PILOT_CLARIFICATION_EXPIRED');
-            const prefix = readPilotClarification(playerId, turn, parts.token);
+            const prefix = readPilotClarification(playerId, turn, parts.token, staging?.clarificationKey);
             objectAnswer = trimmedAction.replace(/[.!?]$/u, '').trim();
             if (!/^[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N} '’-]{0,159}$/u.test(objectAnswer)) {
               throw new PilotTurnError(prefix ? 'PILOT_OBJECT_UNREGISTERED' : 'PILOT_CLARIFICATION_EXPIRED');
@@ -175,7 +225,7 @@ async function startServer() {
           const result = await persistPilotTurn(db,
             turnPlanPilot.catalog, playerId, turn, async (campaign, sceneIntent, present, npcRelationships, narrative, declaredAction) => {
               const mode = process.env.NARRATOR_MODE;
-              if (localFreixo && (!mode || mode === 'fixed')) {
+              if (staging || (localFreixo && (!mode || mode === 'fixed'))) {
                 if (sceneIntent.startsWith('Mostre a reação') && present.npcs[0]) {
                   return sceneIntent.includes('Abra espaço para conversar')
                     ? `${present.npcs[0].name} se volta para Samuel. “Sobre o que quer conversar?”`
@@ -188,6 +238,10 @@ async function startServer() {
                 }
                 if (sceneIntent.startsWith('Descreva o que é visível') && present.activities.length) {
                   return present.activities.map(({ name }) => name + ' está em atividade.').join(' ');
+                }
+                if (sceneIntent.startsWith('Descreva o que é visível') || sceneIntent.startsWith('Descreva somente o que pode ser percebido')) {
+                  const description = turnPlanPilot.catalog.places.find(({ id }) => id === campaign.currentLocation)?.description;
+                  if (description) return description;
                 }
                 return 'O movimento da manhã segue ao redor.';
               }
@@ -209,10 +263,10 @@ async function startServer() {
             PILOT_NARRATION_CONFLICT: 'A resposta do narrador entrou em conflito com o estado da cena. A ação não foi registrada.',
           };
           const step = error instanceof PilotTurnError ? error.step : undefined;
-          const message = messages[code] ?? 'O servidor não confirmou o turno piloto (' + code + ').';
+          const message = messages[code] ?? 'O servidor não confirmou a ação.';
           const prefix = error instanceof PilotTurnError ? error.clarificationPrefix : undefined;
           const clarificationToken = prefix && req.body?.clarificationToken === undefined
-            ? issuePilotClarification(playerId, turn, prefix) : undefined;
+            ? issuePilotClarification(playerId, turn, prefix, staging?.clarificationKey) : undefined;
           const feedback = error instanceof PilotTurnError ? describePilotFeedback(error, Boolean(clarificationToken)) : undefined;
           res.status(status).json({ code, message: feedback ?? (step ? 'Etapa ' + step + '. ' + message : message),
             gameplayFeedback: feedback ? true : undefined, clarificationToken });
@@ -306,6 +360,7 @@ async function startServer() {
           npcs: context.npcs,
           narrative: context.narrative,
           declaredAction: trimmedAction,
+          publicOnly: true,
         }, activeMode);
 
         res.json({
@@ -388,18 +443,15 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else if (IS_PROD) {
-    const distPath = path.resolve(__dirname, 'dist');
-    if (fs.existsSync(distPath)) {
-      app.use(express.static(distPath));
-      app.get('*', (_req, res) => {
-        res.sendFile(path.join(distPath, 'index.html'));
-      });
-    }
+    app.use('/api', (_req, res) => { res.sendStatus(404); });
+    app.use(express.static(frontendPath));
+    app.get('*', (_req, res) => { res.sendFile(indexPath); });
   }
 
   const host = localFreixo ? '127.0.0.1' : '0.0.0.0';
-  app.listen(PORT, host, () => {
-    console.log(`RPG AI Engine server listening on http://${host}:${PORT}`);
+  const listener = app.listen(PORT, host, () => {
+    const address = listener.address();
+    console.log(`RPG AI Engine server listening on http://${host}:${typeof address === 'object' && address ? address.port : PORT}`);
   });
 }
 

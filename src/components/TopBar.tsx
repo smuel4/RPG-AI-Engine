@@ -5,9 +5,9 @@ interface TopBarProps {
   syncState: SyncState;
   userEmail: string | null;
   hasCampaign: boolean;
-  onOpenSaveCheckpoint: () => void;
-  onOpenLoadCheckpoint: () => void;
-  onOpenCampaigns: () => void;
+  onOpenSaveCheckpoint?: () => void;
+  onOpenLoadCheckpoint?: () => void;
+  onOpenCampaigns?: () => void;
   onSignOut: () => void;
 }
 
@@ -41,7 +41,7 @@ export function TopBar({
           aria-label="Ações da campanha"
           className="hidden md:flex items-center gap-6 text-sm text-[#B7B2A6]"
         >
-          {hasCampaign && (
+          {hasCampaign && onOpenSaveCheckpoint && onOpenLoadCheckpoint && (
             <>
               <button
                 type="button"
@@ -59,13 +59,15 @@ export function TopBar({
               </button>
             </>
           )}
-          <button
-            type="button"
-            onClick={onOpenCampaigns}
-            className="hover:text-[#F2E2B0] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D4AF37] rounded px-1 py-1"
-          >
-            Campanhas
-          </button>
+          {onOpenCampaigns && (
+            <button
+              type="button"
+              onClick={onOpenCampaigns}
+              className="hover:text-[#F2E2B0] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D4AF37] rounded px-1 py-1"
+            >
+              Campanhas
+            </button>
+          )}
           <span
             className={`text-xs whitespace-nowrap shrink-0 ${
               syncState === 'error'
@@ -89,7 +91,7 @@ export function TopBar({
         </nav>
 
         {/* Zona 3: Ação principal */}
-        <div className="flex items-center gap-2 shrink-0">
+        {onOpenCampaigns && <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={onOpenCampaigns}
@@ -97,7 +99,7 @@ export function TopBar({
           >
             {hasCampaign ? 'Trocar Campanha' : 'Criar Campanha'}
           </button>
-        </div>
+        </div>}
       </div>
     </header>
   );

@@ -21,7 +21,7 @@ import { turnDocumentIds } from '../src/engine/turnIdentity';
 import { getActiveTimelineId } from '../src/engine/rulesEngine';
 import type { Campaign } from '../src/types/game';
 import { familyKitchen } from './echoArcContinuityFixture';
-import { freixoPlayableCatalog } from './echoArcFreeTurn';
+import { freixoWorldPack } from '../src/world/freixo';
 import { isolatedFirestore } from './isolated-firestore.mjs';
 import { collectPlaytest } from './actionPlaytest';
 import { runFreixoContinuityHttp } from './freixoContinuitySession';
@@ -77,7 +77,8 @@ async function run() {
     const existing = (await campaignRef.get()).data() as Campaign | undefined;
     const pilotNpcs = (bundle: ReturnType<typeof createEchoArcBundle>, lira: ReturnType<typeof createWellEncounterNpc>) => [
       ...bundle.npcs.map((npc) => ({
-        ...npc, campaignId: SERVER_PILOT_ID, location: npc.name === 'Teresa' ? familyKitchen : npc.location,
+        ...npc, campaignId: SERVER_PILOT_ID,
+        location: freixoWorldPack.npcs.find(({ name }) => name === npc.name)?.location ?? npc.location,
       })),
       lira,
     ];
@@ -125,7 +126,7 @@ async function run() {
       ...(continuity ? { worldTime: { ...bundle.campaign.worldTime, hour: 10, minute: 0 } } : {}) };
     const lira = createWellEncounterNpc(ownerId, SERVER_PILOT_ID);
     const npcs = pilotNpcs(bundle, lira);
-    const catalog = freixoPlayableCatalog;
+    const catalog = freixoWorldPack.catalog;
     const batch = db.batch();
     batch.create(campaignRef, campaign);
     for (const npc of npcs) batch.create(npcCollection.doc(npc.id), npc);
